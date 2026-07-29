@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 DEFAULT_OUTPUT = Path("app/src/main/assets/map-data.js")
+DEFAULT_SOURCE = Path("shade-engine/examples/3d.html")
 REGION = {
     "name": "Московская, Санкт-Петербург",
     "center": [30.3229, 59.8521],
@@ -23,8 +24,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source",
         type=Path,
-        required=True,
-        help="Path to a generated 3d.html file.",
+        default=DEFAULT_SOURCE,
+        help=f"Path to a generated 3d.html file (default: {DEFAULT_SOURCE}).",
     )
     parser.add_argument(
         "--output",

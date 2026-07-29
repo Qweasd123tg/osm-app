@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shade-map"
+version = "0.3.0"
+description = "Generate static 2D and 3D maps of building shadows from OpenStreetMap data."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "folium>=0.16,<0.21",
+  "shapely>=2.0,<3",
+]
+
+[project.scripts]
+shade-map = "shade_map:main"
+shade-map-3d = "shade_3d:main"
+
+[tool.setuptools]
+py-modules = ["shade_map", "shade_3d"]
