@@ -9,643 +9,8 @@
     <meta name="theme-color" content="#f6f5f0">
     <title>Слои</title>
     <link rel="stylesheet" href="vendor/maplibre-gl.css">
-    <style>
-      :root {
-        color-scheme: light;
-        --ink: #17231f;
-        --muted: #68736e;
-        --accent: #286b52;
-        --accent-strong: #174d3a;
-        --accent-soft: #e2efe8;
-        --surface: rgba(250, 249, 245, .96);
-        --surface-solid: #faf9f5;
-        --line: rgba(23, 35, 31, .13);
-        --shadow: 0 10px 35px rgba(25, 36, 32, .18);
-        --warning: #b96a20;
-      }
+    <link rel="stylesheet" href="app.css">
 
-      * { box-sizing: border-box; }
-
-      html,
-      body {
-        width: 100%;
-        height: 100%;
-        margin: 0;
-        overflow: hidden;
-        overscroll-behavior: none;
-        background: #e8ece8;
-        color: var(--ink);
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system,
-          BlinkMacSystemFont, "Segoe UI", sans-serif;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      button,
-      input { font: inherit; }
-
-      button { color: inherit; }
-
-      #map {
-        position: fixed;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        height: 100dvh;
-      }
-
-      .glass {
-        border: 1px solid rgba(255, 255, 255, .7);
-        background: var(--surface);
-        box-shadow: var(--shadow);
-        backdrop-filter: blur(18px) saturate(1.15);
-        -webkit-backdrop-filter: blur(18px) saturate(1.15);
-      }
-
-      .topbar {
-        position: fixed;
-        z-index: 10;
-        top: max(12px, env(safe-area-inset-top));
-        left: 12px;
-        right: 12px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        pointer-events: none;
-      }
-
-      .brand,
-      .layers-button { pointer-events: auto; }
-
-      .brand {
-        min-width: 0;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        min-height: 52px;
-        padding: 7px 14px 7px 8px;
-        border-radius: 17px;
-      }
-
-      .brand-mark {
-        display: grid;
-        place-items: center;
-        width: 38px;
-        height: 38px;
-        flex: 0 0 auto;
-        border-radius: 13px;
-        background: var(--accent);
-        color: #fff;
-      }
-
-      .brand-copy { min-width: 0; }
-
-      .brand-copy strong {
-        display: block;
-        font-size: 16px;
-        letter-spacing: -.02em;
-      }
-
-      .brand-copy span {
-        display: block;
-        max-width: 180px;
-        overflow: hidden;
-        color: var(--muted);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .layers-button {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-height: 52px;
-        padding: 0 13px;
-        border: 0;
-        border-radius: 17px;
-        cursor: pointer;
-      }
-
-      .layers-button svg { width: 20px; height: 20px; }
-
-      .active-count {
-        display: grid;
-        place-items: center;
-        min-width: 21px;
-        height: 21px;
-        padding: 0 6px;
-        border-radius: 999px;
-        background: var(--accent);
-        color: #fff;
-        font-size: 11px;
-        font-weight: 700;
-      }
-
-      .mode-switch {
-        position: fixed;
-        z-index: 8;
-        top: calc(max(12px, env(safe-area-inset-top)) + 64px);
-        left: 12px;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        width: 116px;
-        padding: 4px;
-        border-radius: 14px;
-      }
-
-      .mode-switch button,
-      .segment button {
-        min-height: 38px;
-        padding: 0 12px;
-        border: 0;
-        border-radius: 10px;
-        background: transparent;
-        color: var(--muted);
-        cursor: pointer;
-        font-size: 13px;
-        font-weight: 700;
-      }
-
-      .mode-switch button[aria-pressed="true"],
-      .segment button[aria-pressed="true"] {
-        background: var(--accent);
-        color: #fff;
-        box-shadow: 0 3px 12px rgba(40, 107, 82, .24);
-      }
-
-      .recenter {
-        position: fixed;
-        z-index: 8;
-        right: 12px;
-        bottom: 184px;
-        display: grid;
-        place-items: center;
-        width: 48px;
-        height: 48px;
-        border: 0;
-        border-radius: 16px;
-        cursor: pointer;
-      }
-
-      .recenter svg { width: 22px; height: 22px; }
-
-      .connection {
-        position: fixed;
-        z-index: 9;
-        top: calc(max(12px, env(safe-area-inset-top)) + 67px);
-        right: 12px;
-        display: none;
-        align-items: center;
-        min-height: 34px;
-        padding: 0 11px;
-        border-radius: 999px;
-        background: #fff0df;
-        color: #874715;
-        box-shadow: 0 5px 18px rgba(60, 40, 20, .12);
-        font-size: 12px;
-        font-weight: 700;
-      }
-
-      .connection.is-visible { display: flex; }
-
-      .time-card {
-        position: fixed;
-        z-index: 8;
-        right: 12px;
-        bottom: max(12px, env(safe-area-inset-bottom));
-        left: 12px;
-        padding: 12px 14px 10px;
-        border-radius: 22px;
-      }
-
-      .time-head {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-
-      .play-button {
-        display: grid;
-        place-items: center;
-        width: 46px;
-        height: 46px;
-        flex: 0 0 auto;
-        padding: 0;
-        border: 0;
-        border-radius: 16px;
-        background: var(--accent);
-        color: #fff;
-        cursor: pointer;
-        font-size: 17px;
-        box-shadow: 0 5px 16px rgba(40, 107, 82, .28);
-      }
-
-      .time-copy {
-        min-width: 0;
-        flex: 1;
-      }
-
-      .time-copy strong {
-        display: block;
-        font-size: 18px;
-        letter-spacing: -.02em;
-      }
-
-      .time-copy span {
-        display: block;
-        overflow: hidden;
-        color: var(--muted);
-        font-size: 12px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .daylight-pill {
-        min-width: 62px;
-        padding: 7px 9px;
-        border-radius: 12px;
-        background: #fff1cc;
-        color: #805b11;
-        font-size: 11px;
-        font-weight: 800;
-        text-align: center;
-      }
-
-      .daylight-pill.is-night {
-        background: #e7e9ef;
-        color: #5c6271;
-      }
-
-      .time-range,
-      .opacity-range {
-        width: 100%;
-        height: 28px;
-        margin: 6px 0 0;
-        accent-color: var(--accent);
-        cursor: pointer;
-      }
-
-      .time-ends {
-        display: flex;
-        justify-content: space-between;
-        margin-top: -3px;
-        color: var(--muted);
-        font-size: 10px;
-        font-weight: 600;
-      }
-
-      .scrim {
-        position: fixed;
-        z-index: 20;
-        inset: 0;
-        visibility: hidden;
-        border: 0;
-        background: rgba(13, 22, 19, 0);
-        opacity: 0;
-        transition: opacity 180ms ease, visibility 180ms ease;
-      }
-
-      .scrim.is-open {
-        visibility: visible;
-        background: rgba(13, 22, 19, .34);
-        opacity: 1;
-      }
-
-      .sheet {
-        position: fixed;
-        z-index: 21;
-        right: 0;
-        bottom: 0;
-        left: 0;
-        max-height: min(86vh, 760px);
-        padding: 8px 16px max(18px, env(safe-area-inset-bottom));
-        overflow: auto;
-        border: 1px solid rgba(255, 255, 255, .85);
-        border-bottom: 0;
-        border-radius: 28px 28px 0 0;
-        background: var(--surface-solid);
-        box-shadow: 0 -18px 60px rgba(21, 34, 29, .26);
-        transform: translateY(105%);
-        transition: transform 240ms cubic-bezier(.2, .8, .2, 1);
-      }
-
-      .sheet.is-open { transform: translateY(0); }
-
-      .sheet-handle {
-        width: 42px;
-        height: 4px;
-        margin: 2px auto 12px;
-        border-radius: 999px;
-        background: #cbd1cd;
-      }
-
-      .sheet-title {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 16px;
-      }
-
-      .sheet-title h2 {
-        margin: 0;
-        font-size: 23px;
-        letter-spacing: -.03em;
-      }
-
-      .close-button {
-        display: grid;
-        place-items: center;
-        width: 44px;
-        height: 44px;
-        border: 0;
-        border-radius: 14px;
-        background: #ecefeb;
-        cursor: pointer;
-        font-size: 22px;
-      }
-
-      .section-label {
-        margin: 17px 2px 8px;
-        color: var(--muted);
-        font-size: 11px;
-        font-weight: 800;
-        letter-spacing: .08em;
-        text-transform: uppercase;
-      }
-
-      .segment {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 4px;
-        padding: 4px;
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: #eef0ed;
-      }
-
-      .layer-list {
-        display: grid;
-        gap: 8px;
-      }
-
-      .layer-card {
-        display: grid;
-        grid-template-columns: 45px minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 11px;
-        min-height: 68px;
-        padding: 10px 12px;
-        border: 1px solid var(--line);
-        border-radius: 18px;
-        background: #fff;
-      }
-
-      .layer-card.has-control {
-        grid-template-rows: auto auto;
-      }
-
-      .layer-icon {
-        display: grid;
-        place-items: center;
-        width: 45px;
-        height: 45px;
-        grid-row: 1;
-        border-radius: 14px;
-        background: var(--accent-soft);
-        color: var(--accent-strong);
-        font-size: 21px;
-      }
-
-      .layer-icon.shadow-icon {
-        background: #e6e8e7;
-        color: #202b27;
-      }
-
-      .layer-icon.soon-icon {
-        background: #f0f1ef;
-        color: #8b938f;
-      }
-
-      .layer-copy {
-        min-width: 0;
-        grid-row: 1;
-      }
-
-      .layer-copy strong {
-        display: block;
-        font-size: 15px;
-      }
-
-      .layer-copy span {
-        display: block;
-        margin-top: 2px;
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 1.25;
-      }
-
-      .switch {
-        position: relative;
-        width: 48px;
-        height: 28px;
-        grid-row: 1;
-      }
-
-      .switch input {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        opacity: 0;
-      }
-
-      .switch span {
-        position: absolute;
-        inset: 0;
-        border-radius: 999px;
-        background: #cbd1cd;
-        cursor: pointer;
-        transition: background 150ms ease;
-      }
-
-      .switch span::after {
-        content: "";
-        position: absolute;
-        top: 4px;
-        left: 4px;
-        width: 20px;
-        height: 20px;
-        border-radius: 50%;
-        background: #fff;
-        box-shadow: 0 2px 5px rgba(0, 0, 0, .18);
-        transition: transform 150ms ease;
-      }
-
-      .switch input:checked + span { background: var(--accent); }
-      .switch input:checked + span::after { transform: translateX(20px); }
-      .switch input:focus-visible + span { outline: 3px solid rgba(40, 107, 82, .24); }
-
-      .range-row {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        grid-column: 2 / -1;
-        grid-row: 2;
-      }
-
-      .range-row output {
-        min-width: 38px;
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 700;
-        text-align: right;
-      }
-
-      .soon {
-        padding: 5px 8px;
-        border-radius: 999px;
-        background: #f0f1ef;
-        color: #7b847f;
-        font-size: 10px;
-        font-weight: 800;
-        letter-spacing: .04em;
-        text-transform: uppercase;
-      }
-
-      .layer-card.is-disabled { opacity: .65; }
-
-      .sheet-foot {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        margin: 18px 2px 2px;
-        color: var(--muted);
-        font-size: 10px;
-      }
-
-      .loading,
-      .fatal {
-        position: fixed;
-        z-index: 50;
-        inset: 0;
-        display: grid;
-        place-items: center;
-        padding: 28px;
-        background: #edf0ec;
-        text-align: center;
-        transition: opacity 220ms ease, visibility 220ms ease;
-      }
-
-      .loading.is-hidden {
-        visibility: hidden;
-        opacity: 0;
-      }
-
-      .loader-mark {
-        position: relative;
-        width: 72px;
-        height: 72px;
-        margin: 0 auto 18px;
-        border-radius: 24px;
-        background: var(--accent);
-        box-shadow: 0 12px 30px rgba(40, 107, 82, .24);
-      }
-
-      .loader-mark::before,
-      .loader-mark::after {
-        content: "";
-        position: absolute;
-        right: 16px;
-        left: 16px;
-        height: 14px;
-        border: 3px solid #fff;
-        border-top: 0;
-        transform: rotate(0deg) skewY(-18deg);
-      }
-
-      .loader-mark::before { top: 21px; }
-      .loader-mark::after { top: 36px; opacity: .72; }
-
-      .loading strong,
-      .fatal strong {
-        display: block;
-        font-size: 22px;
-      }
-
-      .loading span,
-      .fatal span {
-        display: block;
-        margin-top: 6px;
-        color: var(--muted);
-        font-size: 13px;
-      }
-
-      .fatal { display: none; }
-      .fatal.is-visible { display: grid; }
-
-      .maplibregl-ctrl-bottom-right {
-        right: 5px;
-        bottom: 153px;
-      }
-
-      .maplibregl-ctrl-attrib {
-        border-radius: 8px !important;
-        font-size: 9px !important;
-      }
-
-      .maplibregl-popup-content {
-        min-width: 190px;
-        padding: 14px 16px !important;
-        border-radius: 16px !important;
-        box-shadow: var(--shadow) !important;
-        color: var(--ink);
-      }
-
-      .building-popup strong {
-        display: block;
-        margin-right: 16px;
-        font-size: 14px;
-      }
-
-      .building-popup span {
-        display: block;
-        margin-top: 5px;
-        color: var(--muted);
-        font-size: 12px;
-      }
-
-      @media (min-width: 700px) {
-        .topbar { right: auto; width: 440px; }
-        .time-card { right: auto; width: 560px; }
-        .sheet {
-          top: 0;
-          right: 0;
-          bottom: 0;
-          left: auto;
-          width: 390px;
-          max-height: none;
-          padding-top: max(18px, env(safe-area-inset-top));
-          border-radius: 28px 0 0 28px;
-          transform: translateX(105%);
-        }
-        .sheet.is-open { transform: translateX(0); }
-        .sheet-handle { display: none; }
-      }
-
-      @media (max-width: 380px) {
-        .brand-copy span { max-width: 110px; }
-        .layers-button > span:not(.active-count) { display: none; }
-        .time-card { padding-right: 11px; padding-left: 11px; }
-        .daylight-pill { min-width: 54px; padding-right: 6px; padding-left: 6px; }
-      }
-
-      @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after {
-          scroll-behavior: auto !important;
-          transition-duration: .01ms !important;
-        }
-      }
-    </style>
   </head>
   <body>
     <div id="map" aria-label="Интерактивная карта"></div>
@@ -704,25 +69,65 @@
       </svg>
     </button>
 
+    <button id="locate" class="locate" type="button" aria-label="Загрузить район рядом со мной">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 21s6-5.2 6-11a6 6 0 1 0-12 0c0 5.8 6 11 6 11Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        <circle cx="12" cy="10" r="2.2" stroke="currentColor" stroke-width="1.8"/>
+      </svg>
+    </button>
+
     <section id="time-card" class="time-card glass" aria-label="Время и тени">
       <div class="time-head">
         <button id="play" class="play-button" type="button" aria-label="Запустить движение тени" aria-pressed="false">▶</button>
         <div class="time-copy">
           <strong id="time-value">15:00</strong>
+          <span id="scene-date-label"></span>
           <span id="sun-value">Солнце и направление тени</span>
         </div>
         <div id="daylight-pill" class="daylight-pill">День</div>
       </div>
       <input id="time-range" class="time-range" type="range" min="0" value="0" step="1" aria-label="Время суток">
       <div class="time-ends" aria-hidden="true"><span>00:00</span><span>23:59</span></div>
+      <button id="retry-frame" class="secondary-button" type="button" hidden>Повторить расчёт тени</button>
     </section>
 
     <button id="scrim" class="scrim" type="button" tabindex="-1" aria-label="Закрыть каталог слоёв"></button>
-    <section id="layers-sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="layers-title" aria-hidden="true">
+    <section id="layers-sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="layers-title" aria-hidden="true" inert>
       <div class="sheet-handle" aria-hidden="true"></div>
       <div class="sheet-title">
         <h2 id="layers-title">Слои карты</h2>
         <button id="close-sheet" class="close-button" type="button" aria-label="Закрыть">×</button>
+      </div>
+
+      <div class="section-label">Район</div>
+      <form id="place-form" class="place-form">
+        <input id="place-query" type="search" maxlength="120" autocomplete="off" placeholder="Город, улица или место" aria-label="Поиск места">
+        <button id="place-submit" type="submit">Найти</button>
+      </form>
+      <div class="place-actions">
+        <button id="my-location" type="button">Моё место</button>
+        <button id="load-center" type="button">Центр карты</button>
+      </div>
+      <div id="place-status" class="place-status" role="status">Сейчас показан встроенный район. Новые районы и тени рассчитываются на устройстве.</div>
+      <button id="cancel-scene" class="secondary-button" type="button" hidden>Отменить расчёт</button>
+      <div id="place-results" class="place-results"></div>
+
+      <details class="scene-settings">
+        <summary>Дата расчёта теней</summary>
+        <form id="scene-date-form" class="date-form">
+          <label>Дата<input id="scene-date" type="date" min="1900-01-01" max="2100-12-31" required></label>
+          <label>Часовой пояс<select id="scene-timezone" aria-label="Часовой пояс расчёта"></select></label>
+          <button id="scene-today" class="secondary-button" type="button">Сегодня</button>
+          <button id="scene-recalculate" class="primary-button" type="submit">Пересчитать тени</button>
+        </form>
+        <p class="control-note">Время относится к выбранному часовому поясу. При смене сезона проверьте его смещение. Ветер показывает текущие условия.</p>
+      </details>
+
+      <div class="section-label">Офлайн-города</div>
+      <div id="city-pack-list" class="city-pack-list">
+        <div class="city-pack">
+          <div class="city-pack-copy"><strong>Проверяю доступные пакеты…</strong><span>Размер и состояние появятся здесь</span></div>
+        </div>
       </div>
 
       <div class="section-label">Подложка</div>
@@ -730,10 +135,13 @@
         <button id="base-light" type="button" aria-pressed="true">Светлая</button>
         <button id="base-dark" type="button" aria-pressed="false">Тёмная</button>
       </div>
+      <label class="height-filter"><input id="economy-mode" type="checkbox">Режим экономии</label>
+      <p class="control-note">Снижает разрешение отрисовки и объём 3D-зданий в памяти. Помогает на слабом телефоне.</p>
 
-      <div class="section-label">Активные</div>
-      <div class="layer-list">
-        <div class="layer-card has-control">
+      <div class="section-label">Слои · сверху вниз</div>
+      <p class="control-note">Порядок определяет наложение на карте. В 3D также учитывается высота зданий.</p>
+      <div id="active-layer-list" class="layer-list">
+        <div class="layer-card has-control" data-layer="shadows">
           <div class="layer-icon shadow-icon" aria-hidden="true">◒</div>
           <div class="layer-copy">
             <strong>Тени</strong>
@@ -743,13 +151,13 @@
             <input id="shadow-toggle" type="checkbox" checked>
             <span></span>
           </label>
-          <div class="range-row">
+          <div class="layer-options"><div class="range-row">
             <input id="shadow-opacity" class="opacity-range" type="range" min="10" max="75" value="38" step="1" aria-label="Прозрачность теней">
             <output id="shadow-opacity-value" for="shadow-opacity">38%</output>
-          </div>
+          </div><div class="layer-order"></div></div>
         </div>
 
-        <div class="layer-card">
+        <div class="layer-card has-control" data-layer="buildings">
           <div class="layer-icon" aria-hidden="true">▥</div>
           <div class="layer-copy">
             <strong>Здания</strong>
@@ -759,22 +167,59 @@
             <input id="building-toggle" type="checkbox" checked>
             <span></span>
           </label>
+          <div class="layer-options">
+            <div class="range-row">
+              <input id="building-opacity" class="opacity-range" type="range" min="10" max="100" value="96" step="1" aria-label="Прозрачность зданий">
+              <output id="building-opacity-value" for="building-opacity">96%</output>
+            </div>
+            <label class="height-filter"><input id="confidence-toggle" type="checkbox">Цвет по достоверности высоты</label>
+            <div id="height-legend" class="height-legend" hidden>
+              <span style="--legend-color: #3f8b67">Высота указана в OSM</span>
+              <span style="--legend-color: #e0a22f">Высота рассчитана по этажам</span>
+              <span style="--legend-color: #c76357">Примерная высота по типу здания</span>
+            </div>
+            <div class="layer-order"></div>
+          </div>
         </div>
 
-        <div class="layer-card">
-          <div class="layer-icon" aria-hidden="true">✓</div>
+        <div class="layer-card has-control is-disabled" id="wind-card" data-layer="wind">
+          <div class="layer-icon" aria-hidden="true">≋</div>
           <div class="layer-copy">
-            <strong>Качество высот</strong>
-            <span>Цвет по источнику данных OSM</span>
+            <strong>Ветер</strong>
+            <span id="wind-source">Будет обновлён вместе с районом</span>
           </div>
-          <label class="switch" aria-label="Показывать качество высот">
-            <input id="confidence-toggle" type="checkbox">
+          <label class="switch" aria-label="Показывать направление ветра">
+            <input id="wind-toggle" type="checkbox" checked disabled>
             <span></span>
           </label>
+          <div class="layer-options">
+            <div id="wind-value" class="control-note">нет данных</div>
+            <div class="range-row">
+              <input id="wind-opacity" class="opacity-range" type="range" min="10" max="100" value="85" step="1" aria-label="Прозрачность ветра">
+              <output id="wind-opacity-value" for="wind-opacity">85%</output>
+            </div>
+            <div class="layer-order"></div>
+          </div>
         </div>
       </div>
 
-      <div class="section-label">Следующие эксперименты</div>
+      <div class="section-label">Собственные слои</div>
+      <p class="control-note">Откройте GeoJSON с точками, линиями или областями. Слой сохранится на устройстве и будет доступен без сети.</p>
+      <button id="import-layer" class="primary-button" type="button">Добавить GeoJSON</button>
+      <input id="layer-file" type="file" accept=".geojson,.json,application/geo+json,application/json" hidden>
+      <div id="import-status" class="preset-status" role="status"></div>
+      <p class="control-note">До 5 слоёв, файл до 2 МБ. Для переноса между устройствами используйте исходный файл.</p>
+
+      <div class="section-label">Мои наборы</div>
+      <p class="control-note">Сохраните слои, подложку, режим и время суток для любого района.</p>
+      <form id="preset-form" class="place-form">
+        <input id="preset-name" maxlength="48" required placeholder="Например, вечерняя прогулка" aria-label="Название набора" autocomplete="off">
+        <button type="submit">Сохранить</button>
+      </form>
+      <div id="preset-status" class="preset-status" role="status"></div>
+      <div id="preset-list" class="preset-list"></div>
+
+      <details class="experiments"><summary>Идеи будущих слоёв</summary>
       <div class="layer-list">
         <div class="layer-card is-disabled" aria-disabled="true">
           <div class="layer-icon soon-icon" aria-hidden="true">♧</div>
@@ -792,480 +237,20 @@
           <span class="soon">скоро</span>
         </div>
       </div>
+      </details>
 
       <div class="sheet-foot">
         <span id="data-status">Демо-район</span>
-        <span>prototype 0.1</span>
+        <span>Слои · 0.5.0</span>
       </div>
     </section>
 
     <script src="vendor/maplibre-gl.js"></script>
     <script src="map-data.js"></script>
-    <script>
-      "use strict";
+    <script src="layer-settings.js"></script>
+    <script src="layer-runtime.js"></script>
+    <script src="layer-library.js"></script>
+    <script src="app.js"></script>
 
-      const $ = (id) => document.getElementById(id);
-      const data = window.SLOI_MAP_DATA;
-      let map = null;
-      let mapReady = false;
-      let popup = null;
-      let playbackTimer = null;
-      let tileErrorTimer = null;
-
-      const elements = {
-        loading: $("loading"),
-        fatal: $("fatal"),
-        fatalMessage: $("fatal-message"),
-        regionName: $("region-name"),
-        layersButton: $("layers-button"),
-        activeCount: $("active-count"),
-        mode2d: $("mode-2d"),
-        mode3d: $("mode-3d"),
-        connection: $("connection"),
-        recenter: $("recenter"),
-        play: $("play"),
-        timeValue: $("time-value"),
-        sunValue: $("sun-value"),
-        daylightPill: $("daylight-pill"),
-        timeRange: $("time-range"),
-        scrim: $("scrim"),
-        sheet: $("layers-sheet"),
-        closeSheet: $("close-sheet"),
-        baseLight: $("base-light"),
-        baseDark: $("base-dark"),
-        shadowToggle: $("shadow-toggle"),
-        shadowOpacity: $("shadow-opacity"),
-        shadowOpacityValue: $("shadow-opacity-value"),
-        buildingToggle: $("building-toggle"),
-        confidenceToggle: $("confidence-toggle"),
-        dataStatus: $("data-status"),
-      };
-
-      function showFatal(message) {
-        elements.loading.classList.add("is-hidden");
-        elements.fatalMessage.textContent = String(message || "Неизвестная ошибка");
-        elements.fatal.classList.add("is-visible");
-      }
-
-      window.SloiApp = {
-        showFatal,
-        closeTransientUi() {
-          if (elements.sheet.classList.contains("is-open")) {
-            closeSheet();
-            return true;
-          }
-          if (popup) {
-            popup.remove();
-            popup = null;
-            return true;
-          }
-          return false;
-        },
-      };
-
-      if (!data || !data.region || !Array.isArray(data.shadeFrames)) {
-        showFatal("В APK отсутствуют данные карты");
-        throw new Error("SLOI_MAP_DATA is missing or malformed");
-      }
-      if (typeof maplibregl === "undefined") {
-        showFatal("В APK отсутствует MapLibre");
-        throw new Error("MapLibre is missing");
-      }
-
-      const frames = data.shadeFrames;
-      const defaultFrame = Math.max(0, frames.findIndex((frame) => frame.label === "15:00"));
-      const defaults = {
-        mode: "3d",
-        basemap: "light",
-        shadows: true,
-        buildings: true,
-        confidence: false,
-        shadowOpacity: 0.38,
-        frame: defaultFrame,
-      };
-
-      function loadState() {
-        try {
-          const saved = JSON.parse(localStorage.getItem("sloi-map-state") || "{}");
-          return {
-            mode: saved.mode === "2d" ? "2d" : defaults.mode,
-            basemap: saved.basemap === "dark" ? "dark" : defaults.basemap,
-            shadows: typeof saved.shadows === "boolean" ? saved.shadows : defaults.shadows,
-            buildings: typeof saved.buildings === "boolean" ? saved.buildings : defaults.buildings,
-            confidence: typeof saved.confidence === "boolean" ? saved.confidence : defaults.confidence,
-            shadowOpacity: Number.isFinite(saved.shadowOpacity)
-              ? Math.max(.1, Math.min(.75, saved.shadowOpacity))
-              : defaults.shadowOpacity,
-            frame: Number.isInteger(saved.frame)
-              ? Math.max(0, Math.min(frames.length - 1, saved.frame))
-              : defaults.frame,
-          };
-        } catch (error) {
-          console.warn("Could not restore state", error);
-          return { ...defaults };
-        }
-      }
-
-      const state = loadState();
-
-      function saveState() {
-        localStorage.setItem("sloi-map-state", JSON.stringify(state));
-      }
-
-      function haptic() {
-        try {
-          if (window.AndroidHost && typeof window.AndroidHost.haptic === "function") {
-            window.AndroidHost.haptic();
-          }
-        } catch (error) {
-          console.debug("Haptic feedback unavailable", error);
-        }
-      }
-
-      function shadowCollection(geometry) {
-        if (!geometry) return { type: "FeatureCollection", features: [] };
-        return {
-          type: "FeatureCollection",
-          features: [{ type: "Feature", properties: {}, geometry }],
-        };
-      }
-
-      const neutralBuildingColor = "#d9d8cf";
-      const confidenceColor = [
-        "match",
-        ["get", "height_source"],
-        "height", "#3f8b67",
-        "levels", "#e0a22f",
-        "#c76357",
-      ];
-
-      function setLayerVisibility(id, visible) {
-        if (mapReady && map.getLayer(id)) {
-          map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
-        }
-      }
-
-      function applyControls() {
-        elements.mode2d.setAttribute("aria-pressed", String(state.mode === "2d"));
-        elements.mode3d.setAttribute("aria-pressed", String(state.mode === "3d"));
-        elements.baseLight.setAttribute("aria-pressed", String(state.basemap === "light"));
-        elements.baseDark.setAttribute("aria-pressed", String(state.basemap === "dark"));
-        elements.shadowToggle.checked = state.shadows;
-        elements.buildingToggle.checked = state.buildings;
-        elements.confidenceToggle.checked = state.confidence;
-        elements.shadowOpacity.value = String(Math.round(state.shadowOpacity * 100));
-        elements.shadowOpacityValue.value = `${Math.round(state.shadowOpacity * 100)}%`;
-        elements.shadowOpacityValue.textContent = `${Math.round(state.shadowOpacity * 100)}%`;
-        elements.activeCount.textContent = String(
-          Number(state.shadows) + Number(state.buildings) + Number(state.confidence),
-        );
-      }
-
-      function applyMapState(animate) {
-        applyControls();
-        saveState();
-        if (!mapReady) return;
-
-        setLayerVisibility("base-light", state.basemap === "light");
-        setLayerVisibility("base-dark", state.basemap === "dark");
-        setLayerVisibility("ground-shadows", state.shadows);
-        setLayerVisibility("buildings-flat", state.buildings && state.mode === "2d");
-        setLayerVisibility("buildings-3d", state.buildings && state.mode === "3d");
-
-        map.setPaintProperty("ground-shadows", "fill-opacity", state.shadowOpacity);
-        map.setPaintProperty(
-          "ground-shadows",
-          "fill-color",
-          state.basemap === "dark" ? "#09110e" : "#17231f",
-        );
-        const buildingColor = state.confidence ? confidenceColor : neutralBuildingColor;
-        map.setPaintProperty("buildings-flat", "fill-color", buildingColor);
-        map.setPaintProperty("buildings-3d", "fill-extrusion-color", buildingColor);
-
-        const camera = state.mode === "3d"
-          ? { pitch: 56, bearing: -22 }
-          : { pitch: 0, bearing: 0 };
-        map.easeTo({ ...camera, duration: animate ? 550 : 0 });
-      }
-
-      function showFrame(index, persist = true) {
-        const safeIndex = Math.max(0, Math.min(frames.length - 1, Number(index)));
-        const frame = frames[safeIndex];
-        state.frame = safeIndex;
-        elements.timeRange.value = String(safeIndex);
-        elements.timeValue.textContent = frame.label;
-        elements.sunValue.textContent = frame.altitude <= .5
-          ? "Солнце ниже горизонта — наземной тени нет"
-          : `Солнце ${Math.round(frame.altitude)}° · тень ${Math.round(frame.shadow_bearing)}°`;
-        elements.daylightPill.textContent = frame.altitude <= .5 ? "Ночь" : "День";
-        elements.daylightPill.classList.toggle("is-night", frame.altitude <= .5);
-        if (mapReady) {
-          const source = map.getSource("shadows");
-          if (source) source.setData(shadowCollection(frame.geometry));
-        }
-        if (persist) saveState();
-      }
-
-      function stopPlayback() {
-        if (playbackTimer !== null) window.clearInterval(playbackTimer);
-        playbackTimer = null;
-        elements.play.textContent = "▶";
-        elements.play.setAttribute("aria-label", "Запустить движение тени");
-        elements.play.setAttribute("aria-pressed", "false");
-      }
-
-      function startPlayback() {
-        if (playbackTimer !== null) {
-          stopPlayback();
-          return;
-        }
-        haptic();
-        elements.play.textContent = "❚❚";
-        elements.play.setAttribute("aria-label", "Остановить движение тени");
-        elements.play.setAttribute("aria-pressed", "true");
-        playbackTimer = window.setInterval(() => {
-          const next = (state.frame + 1) % frames.length;
-          showFrame(next, false);
-          if (next === 0) saveState();
-        }, 360);
-      }
-
-      function openSheet() {
-        elements.scrim.classList.add("is-open");
-        elements.sheet.classList.add("is-open");
-        elements.sheet.setAttribute("aria-hidden", "false");
-        window.setTimeout(() => elements.closeSheet.focus(), 100);
-      }
-
-      function closeSheet() {
-        elements.scrim.classList.remove("is-open");
-        elements.sheet.classList.remove("is-open");
-        elements.sheet.setAttribute("aria-hidden", "true");
-        elements.layersButton.focus();
-      }
-
-      function fitRegion(animate) {
-        if (!map) return;
-        map.fitBounds(data.region.bounds, {
-          padding: { top: 120, right: 24, bottom: 190, left: 24 },
-          pitch: state.mode === "3d" ? 56 : 0,
-          bearing: state.mode === "3d" ? -22 : 0,
-          duration: animate ? 650 : 0,
-        });
-      }
-
-      function setConnectionWarning(message) {
-        window.clearTimeout(tileErrorTimer);
-        elements.connection.textContent = message;
-        elements.connection.classList.add("is-visible");
-        if (navigator.onLine) {
-          tileErrorTimer = window.setTimeout(
-            () => elements.connection.classList.remove("is-visible"),
-            4000,
-          );
-        }
-      }
-
-      function updateOnlineState() {
-        if (navigator.onLine) {
-          elements.connection.classList.remove("is-visible");
-        } else {
-          setConnectionWarning("Без подложки");
-        }
-      }
-
-      function buildingPopup(event) {
-        const feature = event.features && event.features[0];
-        if (!feature) return;
-        const properties = feature.properties || {};
-        const content = document.createElement("div");
-        content.className = "building-popup";
-        const title = document.createElement("strong");
-        title.textContent = properties.name || "Здание";
-        const height = document.createElement("span");
-        height.textContent = `Высота: ${Math.round(Number(properties.height) || 0)} м`;
-        const source = document.createElement("span");
-        source.textContent = `Источник: ${properties.height_source || "default"}`;
-        content.append(title, height, source);
-        if (popup) popup.remove();
-        popup = new maplibregl.Popup({ offset: 12, closeButton: true })
-          .setLngLat(event.lngLat)
-          .setDOMContent(content)
-          .addTo(map);
-        popup.on("close", () => { popup = null; });
-      }
-
-      elements.regionName.textContent = data.region.name;
-      elements.dataStatus.textContent = `${data.buildings.features.length} зданий · ${frames.length} кадров`;
-      elements.timeRange.max = String(frames.length - 1);
-      applyControls();
-      showFrame(state.frame);
-      updateOnlineState();
-
-      elements.layersButton.addEventListener("click", openSheet);
-      elements.closeSheet.addEventListener("click", closeSheet);
-      elements.scrim.addEventListener("click", closeSheet);
-      elements.mode2d.addEventListener("click", () => {
-        state.mode = "2d";
-        haptic();
-        applyMapState(true);
-      });
-      elements.mode3d.addEventListener("click", () => {
-        state.mode = "3d";
-        haptic();
-        applyMapState(true);
-      });
-      elements.baseLight.addEventListener("click", () => {
-        state.basemap = "light";
-        haptic();
-        applyMapState(false);
-      });
-      elements.baseDark.addEventListener("click", () => {
-        state.basemap = "dark";
-        haptic();
-        applyMapState(false);
-      });
-      elements.shadowToggle.addEventListener("change", () => {
-        state.shadows = elements.shadowToggle.checked;
-        haptic();
-        applyMapState(false);
-      });
-      elements.buildingToggle.addEventListener("change", () => {
-        state.buildings = elements.buildingToggle.checked;
-        haptic();
-        applyMapState(false);
-      });
-      elements.confidenceToggle.addEventListener("change", () => {
-        state.confidence = elements.confidenceToggle.checked;
-        haptic();
-        applyMapState(false);
-      });
-      elements.shadowOpacity.addEventListener("input", () => {
-        state.shadowOpacity = Number(elements.shadowOpacity.value) / 100;
-        applyMapState(false);
-      });
-      elements.timeRange.addEventListener("input", () => {
-        stopPlayback();
-        showFrame(elements.timeRange.value);
-      });
-      elements.play.addEventListener("click", startPlayback);
-      elements.recenter.addEventListener("click", () => {
-        haptic();
-        fitRegion(true);
-      });
-      window.addEventListener("online", updateOnlineState);
-      window.addEventListener("offline", updateOnlineState);
-      document.addEventListener("visibilitychange", () => {
-        if (document.hidden) stopPlayback();
-      });
-      document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") closeSheet();
-      });
-
-      try {
-        map = new maplibregl.Map({
-          container: "map",
-          center: data.region.center,
-          zoom: 14.8,
-          pitch: state.mode === "3d" ? 56 : 0,
-          bearing: state.mode === "3d" ? -22 : 0,
-          maxPitch: 70,
-          attributionControl: false,
-          style: {
-            version: 8,
-            sources: {
-              "carto-light": {
-                type: "raster",
-                tiles: ["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
-                tileSize: 256,
-                attribution: "© OpenStreetMap contributors © CARTO",
-              },
-              "carto-dark": {
-                type: "raster",
-                tiles: ["https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"],
-                tileSize: 256,
-                attribution: "© OpenStreetMap contributors © CARTO",
-              },
-            },
-            layers: [
-              { id: "base-light", type: "raster", source: "carto-light" },
-              {
-                id: "base-dark",
-                type: "raster",
-                source: "carto-dark",
-                layout: { visibility: "none" },
-              },
-            ],
-          },
-        });
-        map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
-
-        map.on("load", () => {
-          map.addSource("shadows", {
-            type: "geojson",
-            data: shadowCollection(frames[state.frame].geometry),
-          });
-          map.addSource("buildings", {
-            type: "geojson",
-            data: data.buildings,
-          });
-          map.addLayer({
-            id: "ground-shadows",
-            type: "fill",
-            source: "shadows",
-            paint: {
-              "fill-color": "#17231f",
-              "fill-opacity": state.shadowOpacity,
-            },
-          });
-          map.addLayer({
-            id: "buildings-flat",
-            type: "fill",
-            source: "buildings",
-            paint: {
-              "fill-color": neutralBuildingColor,
-              "fill-opacity": .8,
-              "fill-outline-color": "#8b928c",
-            },
-          });
-          map.addLayer({
-            id: "buildings-3d",
-            type: "fill-extrusion",
-            source: "buildings",
-            paint: {
-              "fill-extrusion-color": neutralBuildingColor,
-              "fill-extrusion-height": ["get", "height"],
-              "fill-extrusion-base": ["get", "min_height"],
-              "fill-extrusion-opacity": .9,
-              "fill-extrusion-vertical-gradient": true,
-            },
-          });
-
-          mapReady = true;
-          applyMapState(false);
-          showFrame(state.frame);
-          fitRegion(false);
-          elements.loading.classList.add("is-hidden");
-
-          for (const layer of ["buildings-flat", "buildings-3d"]) {
-            map.on("click", layer, buildingPopup);
-            map.on("mouseenter", layer, () => { map.getCanvas().style.cursor = "pointer"; });
-            map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; });
-          }
-        });
-
-        map.on("error", (event) => {
-          const message = String(event.error && event.error.message || "");
-          if (/tile|network|fetch|request/i.test(message)) {
-            setConnectionWarning("Подложка недоступна");
-          } else {
-            console.warn("MapLibre error", event.error);
-          }
-        });
-      } catch (error) {
-        console.error(error);
-        showFatal(error.message || "Ошибка запуска карты");
-      }
-    </script>
   </body>
 </html>
