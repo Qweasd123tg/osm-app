@@ -27,40 +27,61 @@ for (const [type, file] of Object.entries(references)) {
   assert(Object.isFrozen(symbol) && Object.isFrozen(symbol.viewBox) && Object.isFrozen(symbol.paths) && Object.isFrozen(symbol.paths[0]));
   const viewBox = svg.match(/viewBox="([^"]+)"/)[1].split(/\s+/).map(Number);
   assert.deepEqual(plain(symbol), {viewBox, paths:[{d,fillRule:svg.includes('fill-rule="evenodd"')?'evenodd':'nonzero'}]});
-  if (type === 'metro-plain') continue;
-  assert(renderer.icon(type).calls.some(([method,path,rule]) =>
-    method==='fill' && path?.data===d && rule===symbol.paths[0].fillRule));
 }
 assert.equal(symbols.get('constructor'),null);
 assert.equal(new Set(Object.keys(references).map(type=>symbols.get(type).paths[0].d)).size,5);
+for (const type of ['bus','tram','trolley']) {
+  const svg = asset(`vendor/twogis-transport/map-${type}.svg`);
+  const [, x, y, iconGroup] = svg.match(/<g id="Icon-container-\d+" transform="translate\(([\d.]+), ([\d.]+)\)"[^>]*>([\s\S]*?)<\/g>/);
+  const paths = [...iconGroup.matchAll(/<path\b[^>]*\bd="([^"]+)"[^>]*>/g)].map(([tag,d]) =>
+    ({d,fillRule:tag.match(/\bfill-rule="([^"]+)"/)?.[1] || 'evenodd'}));
+  const symbol = symbols.getMap(type);
+  assert.deepEqual(plain(symbol), {viewBox:[-7-Number(x),-7-Number(y),44,44],paths});
+  assert.deepEqual(renderer.icon(type).calls.filter(([method])=>method==='fill')
+    .map(([,path,fillRule])=>({d:path.data,fillRule})), paths);
+}
 const directed=renderer.body('#123456',true),round=renderer.body('#123456',false);
-const circle = round.calls.find(([method]) => method === 'arc');
-assert.deepEqual(circle, ['arc', renderer.size / 2, renderer.size / 2, 13.5, 0, Math.PI * 2], 'The badge is centered on the GPS fix');
-assert.deepEqual(directed.calls.slice(0, round.calls.length), round.calls, 'Heading does not change the shape of the circle');
-assert(!round.calls.some(([method]) => method === 'moveTo'), 'Unknown direction draws only a circle');
-const arrow = directed.calls.slice(round.calls.length);
-assert.deepEqual(arrow.filter(([method]) => ['beginPath', 'moveTo', 'lineTo', 'closePath'].includes(method)), [
-  ['beginPath'], ['moveTo', 20, .9], ['lineTo', 23.9, 4.6], ['lineTo', 16.1, 4.6], ['closePath'],
-], 'The north-facing arrow is drawn in a separate path');
-const circleStroke = round.calls.find(([method]) => method === 'lineWidth')[1];
-const arrowStroke = arrow.find(([method]) => method === 'lineWidth')[1];
-assert(20 - circle[3] - circleStroke / 2 - (4.6 + arrowStroke / 2) > .5, 'Space between the stroked shapes stays transparent');
+const arrowSvg = asset('vendor/twogis-transport/map-vehicle-arrow.svg');
+const groups = [...arrowSvg.matchAll(/<g\b[^>]*transform="translate\((\d+), (\d+)\)"[^>]*>([\s\S]*?)<\/g>/g)];
+const polygons = groups.flatMap(([, tx, ty, group]) => group.match(/points="([^"]+)"/)[1]
+  .split(' ').reduce((commands, _, index, values) => {
+    if (index % 2 === 0) commands.push([index ? 'lineTo' : 'moveTo', Number(values[index])+Number(tx), Number(values[index+1])+Number(ty)]);
+    return commands;
+  }, []));
+const circles = groups.map(([, tx, ty, group]) => {
+  const [, x, y, radius] = group.match(/cx="(\d+)" cy="(\d+)" r="(\d+)"/);
+  return ['arc', Number(x)+Number(tx), Number(y)+Number(ty), Number(radius), 0, Math.PI*2];
+});
+assert.deepEqual(directed.calls.filter(([method])=>['moveTo','lineTo'].includes(method)),polygons);
+assert.deepEqual(directed.calls.filter(([method])=>method==='arc'),circles);
+assert.deepEqual(round.calls.filter(([method])=>method==='arc'),circles, 'Unknown direction keeps the same circle');
+assert(!round.calls.some(([method])=>method==='moveTo'));
+assert.deepEqual(directed.calls.filter(([method])=>method==='strokeStyle'), [['strokeStyle','#ffffff'],['strokeStyle','#123456']]);
 assert.equal(new Set(['bus','tram','trolley'].map(type=>JSON.stringify(renderer.icon(type).calls))).size,3);
 const metroGlyph = renderer.icon('metro', '#1f2937').calls;
 assert.deepEqual(metroGlyph.find(([method])=>method==='arc'), ['arc',20,20,9.5,0,Math.PI*2]);
 assert.deepEqual(metroGlyph.filter(([method])=>method==='fillStyle'), [['fillStyle','#ffffff'],['fillStyle','#000000']]);
 assert.deepEqual(renderer.icon('metro','#ffffff').calls, metroGlyph, 'The original monochrome metro palette has no tint variants');
+const metroEntrance = renderer.icon('metro-plain', '#326995').calls;
+assert(!metroEntrance.some(([method])=>method==='arc'), 'The entrance logo has no circular backing');
+for (const [file,color] of [['map-metro-spb.svg','#005da8'],['map-metro-spb-night.svg','#326995']]) {
+  const svg = asset(`vendor/twogis-transport/${file}`);
+  const paths = [...svg.matchAll(/<path d="([^"]+)" fill="([^"]+)"/g)].slice(-2)
+    .map(([,d,fill])=>({d,fill,fillRule:'nonzero'}));
+  assert.deepEqual(plain(symbols.getMap('metro-plain',color)), {viewBox:[0,0,16,12],paths});
+  const calls = renderer.icon('metro-plain',color).calls;
+  assert.deepEqual(calls.filter(([method])=>method==='fill').map(([,path])=>path.data),paths.map(({d})=>d));
+  assert.deepEqual(calls.filter(([method])=>method==='fillStyle').map(([,fill])=>fill),paths.map(({fill})=>fill));
+  assert(calls.some(([method])=>method==='clip'));
+}
 assert.equal(renderer.foreground('#ffffff'),'#1f2937');assert.equal(renderer.foreground('#000000'),'#ffffff');
+for (const fill of ['#1A73F0','#eb5a2b','#e9a300','#c48900']) assert.equal(renderer.foreground(fill),'#ffffff');
 assert.throws(()=>renderer.body('red',true));assert.throws(()=>renderer.icon('subway'));
 const roundedBus = renderer.icon('bus', '#64828c', 'rounded').calls;
-const plate = roundedBus.slice(0, roundedBus.findIndex(([method])=>method==='fill') + 1);
-assert.deepEqual(plate[1], ['fillStyle', '#64828c']);
-assert(plate.some(([method,x,y])=>method==='moveTo' && x===12 && y===8));
-assert.deepEqual(plate.filter(([method])=>method==='quadraticCurveTo'), [
-  ['quadraticCurveTo',31,8,31,11], ['quadraticCurveTo',31,32,28,32],
-  ['quadraticCurveTo',9,32,9,29], ['quadraticCurveTo',9,8,12,8],
-]);
-assert(roundedBus.some(([method,color])=>method==='fillStyle' && color==='#111820'));
+const stopPaths = ['map-stop-back.svg','map-stop-bus.svg'].map(file=>asset(`vendor/twogis-transport/${file}`).match(/<path\b[^>]*\bd="([^"]+)"/)[1]);
+assert.deepEqual(roundedBus.filter(([method])=>method==='fill').map(([,path])=>path.data),stopPaths);
+assert.deepEqual(roundedBus.filter(([method])=>method==='fillStyle'),
+  [['fillStyle','#64828c'],['fillStyle','#202122']]);
 assert(renderer.icon('bus','#122132','rounded').calls.some(([method,color])=>method==='fillStyle' && color==='#ffffff'));
 const sources=new Map(),layers=new Map(),images=new Map();let context;
 const foreign={foreign:true};images.set('module-caps:vehicle-0',foreign);
@@ -130,37 +151,49 @@ assert.notEqual(roundedStopIds[0], brightStopId, 'A rounded plate never replaces
 assert.deepEqual(images.get(roundedStopIds[0]).calls, roundedBus);
 assert.equal(layers.get('module-caps:rounded-stops-point-icon').layout['icon-size'], .5);
 
-const stationOptions = { pointIcon: 'metro', pointMinZoom: 10, pointIconMinZoom: 12, pointIconSize: .65, colorProperty: 'color' };
-const stations = {type:'FeatureCollection',features:[
+const entranceOptions = { pointIcon: 'metro-plain', pointMinZoom: 15, pointIconSize: 1, color: '#326995' };
+const entrances = {type:'FeatureCollection',features:[
   feature(null, 'bus', '#111111'),
   feature(null, 'bus', '#123456'),
   feature(null, 'bus', '#eeeeee'),
 ]};
-context.setGeoJson('stations', stations, stationOptions);
-const stationLayer = layers.get('module-caps:stations-point-icon');
-assert.equal(layers.get('module-caps:stations-point').minzoom, 10);
-assert.equal(stationLayer.minzoom, 12);
-assert.equal(stationLayer.layout['icon-rotation-alignment'], 'viewport');
-assert.equal(stationLayer.layout['icon-pitch-alignment'], 'viewport');
-assert.equal(stationLayer.layout['icon-rotate'], 0);
-const ids = sources.get('module-caps:stations-source').data.features.map(f=>f.properties.__modulePointIconImage);
+context.setGeoJson('entrances', entrances, entranceOptions);
+const entranceLayer = layers.get('module-caps:entrances-point-icon');
+const entranceCircle = layers.get('module-caps:entrances-point');
+assert.equal(entranceCircle.minzoom, 15);
+assert.equal(entranceLayer.minzoom, 15);
+assert.equal(entranceLayer.layout['icon-size'], 1);
+assert.equal(entranceLayer.layout['icon-rotation-alignment'], 'viewport');
+assert.equal(entranceLayer.layout['icon-pitch-alignment'], 'viewport');
+assert.equal(entranceLayer.layout['icon-rotate'], 0);
+const ids = sources.get('module-caps:entrances-source').data.features.map(f=>f.properties.__modulePointIconImage);
 assert(ids.every(Boolean));
-assert.equal(new Set(ids).size, 1, 'Share the official logo across station colors');
-assert.deepEqual(images.get(ids[0]).calls, metroGlyph);
+assert.equal(new Set(ids).size, 1, 'Entrances share the same blue emblem');
+assert.deepEqual(images.get(ids[0]).calls, metroEntrance);
+assert.deepEqual(plain(entranceCircle.paint['circle-opacity']),
+  ['step', ['zoom'], .8, 15, ['case', ['==', ['get', '__modulePointIconImage'], ''], .8, 0]]);
+context.setGeoJson('entrances', stop, {...entranceOptions, opacity: .4});
+assert.deepEqual(plain(entranceCircle.paint['circle-stroke-opacity']),
+  ['step', ['zoom'], .4, 15, ['case', ['==', ['get', '__modulePointIconImage'], ''], .4, 0]]);
+assert.equal(entranceLayer.paint['icon-opacity'], .4);
+assert(images.has(ids[0]), 'An opacity change keeps the same texture');
 assert.throws(()=>context.setGeoJson('bad', stop, {pointIcon:'unsupported'}), /пиктограмма/);
 assert.throws(()=>context.setGeoJson('bad', stop, {pointIcon:'bus',pointMarker:'vehicle'}), /пиктограмма/);
 assert.throws(()=>context.setGeoJson('bad', stop, {pointIcon:'bus',pointMinZoom:15,pointIconMinZoom:14}), /масштаб/);
 assert.throws(()=>context.setGeoJson('bad', stop, {pointIcon:'bus',pointIconSize:1.1}), /размер/);
 assert.throws(()=>context.setGeoJson('bad', stop, {pointIcon:'bus',pointIconBackground:'square'}), /фон/);
 assert.throws(()=>context.setGeoJson('bad', stop, {pointIcon:'metro',pointIconBackground:'rounded'}), /фон/);
+assert.throws(()=>context.setGeoJson('bad', stop, {pointIcon:'metro-plain',pointIconBackground:'rounded'}), /фон/);
 assert.throws(()=>context.setGeoJson('bad', stop, {pointIconBackground:'rounded'}), /фон/);
-context.setGeoJson('stations', stations.features[2], {...stationOptions, opacity: .4});
-assert.equal(stationLayer.paint['icon-opacity'], .4);
-assert(images.has(ids[0]), 'Keep the emblem after a line color changes');
-context.setGeoJson('stations', {type:'FeatureCollection',features:[]}, stationOptions);
+context.setGeoJson('entrances', {type:'FeatureCollection',features:[]}, entranceOptions);
 assert(!images.has(ids[0]), 'Release an emblem unused by all sources');
-context.setGeoJson('stations', stations, stationOptions);
-const currentMetroId = sources.get('module-caps:stations-source').data.features[0].properties.__modulePointIconImage;
+context.setGeoJson('entrances', {type:'FeatureCollection',features:Array.from({length:70},(_,i)=>
+  feature(null, 'bus', `#${(0x326900+i).toString(16)}`))}, {...entranceOptions, colorProperty:'color'});
+const crowdedEntrances = sources.get('module-caps:entrances-source').data.features;
+assert(crowdedEntrances.some(f=>f.properties.__modulePointIconImage===''), 'At the texture limit some features retain only the fallback point');
+assert.equal(host.entry('caps').session.vehicleImages.size, limits.maxVehicleImages);
+context.setGeoJson('entrances', entrances, entranceOptions);
+const currentMetroId = sources.get('module-caps:entrances-source').data.features[0].properties.__modulePointIconImage;
 render([]);
 assert(images.has(sources.get('module-caps:stops-source').data.features[0].properties.__modulePointIconImage),
   'Clearing the vehicle source does not remove a sprite used by stops');
@@ -172,13 +205,28 @@ assert.equal(sources.size,0);assert.equal(layers.size,0);
 assert.throws(()=>render([feature(0)]),{name:'AbortError'});
 sandbox.window.Path2D = undefined;
 await host.enable('caps');
-assert.equal(renderer.icon('metro'),null);
-const circleOnly = context.setGeoJson('stations',stations,stationOptions);
-assert(!circleOnly.layerIds.some(id=>id.endsWith('-point-icon')));
-assert.equal(layers.get('module-caps:stations-point').type,'circle');
+assert.equal(renderer.icon('metro-plain'),null);
+const entranceFallback = context.setGeoJson('entrances',stop,entranceOptions);
+assert(!entranceFallback.layerIds.some(id=>id.endsWith('-point-icon')));
+assert.equal(layers.get('module-caps:entrances-point').type,'circle');
+assert.equal(layers.get('module-caps:entrances-point').paint['circle-opacity'], .8);
 context.setGeoJson('stops',stop,roundedStopOptions);
 assert.throws(()=>context.setGeoJson('stops',stop,{...roundedStopOptions,pointIconBackground:'none'}), /без перезапуска/);
 assert.equal(host.get('caps').status,'error');
 assert.equal(images.size,2,'Rejected layout change releases owned sprites and preserves foreign ones');
 host.dispose();
+// A transport number and a generic badge may share text/color in one module.
+// Their different sizes must never collide in the image cache.
+let labelContext;
+const labelHost = new Host({map});
+labelHost.register({id:'label-proof',apiVersion:1,version:'1',title:'Labels',capabilities:['geojson'],defaults:{}},ctx=>{labelContext=ctx});
+await labelHost.enable('label-proof');
+for (const [id, style] of [['standard','badge'],['transport','vehicle']]) {
+  labelContext.setGeoJson(id, {type:'FeatureCollection',features:[stop]}, {pointLabel:'label',pointLabelStyle:style,color:'#123456'});
+}
+const standardId=sources.get('module-label-proof:standard-source').data.features[0].properties.__moduleLabelImage;
+const transportId=sources.get('module-label-proof:transport-source').data.features[0].properties.__moduleLabelImage;
+assert.notEqual(standardId,transportId,'Badge style is part of the cache key');
+assert.equal(labelHost.entry('label-proof').session.labelImages.size,2);
+labelHost.dispose();assert.equal(sources.size,0);assert.equal(images.size,2);
 console.log('Vehicle and static point sprites OK: heading, upright glyphs, contrast, zoom, bounds, shared textures and owned cleanup');

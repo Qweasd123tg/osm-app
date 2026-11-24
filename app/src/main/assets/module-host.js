@@ -5,7 +5,7 @@
   const limits = Object.freeze({ maxSettingsBytes: 16384, maxSources: 4, maxGeoJsonBytes: 2 * 1024 * 1024, maxPointLabels: 128, maxVehicleImages: 64, moveDebounceMs: 120 });
   const idPattern = /^[a-z][a-z0-9-]{0,47}$/;
   const forbidden = new Set(["__proto__", "constructor", "prototype"]);
-  const pointIconTypes = new Set(["bus", "tram", "trolley", "metro"]);
+  const pointIconTypes = new Set(["bus", "tram", "trolley", "metro", "metro-plain"]);
 
   function json(value, label, maxBytes) {
     const serialized = JSON.stringify(value, (key, item) => {
@@ -221,7 +221,7 @@
           session.labelImages.delete(cacheKey);
         }
       };
-      const labelKey = (text, color, style) => (style === "text" ? `text-${root.document?.documentElement?.dataset?.theme || "light"}|` : "") + color + "|" + text;
+      const labelKey = (text, color, style) => (style === "text" ? `text-${root.document?.documentElement?.dataset?.theme || "light"}|` : `${style}|`) + color + "|" + text;
       const labelImage = (value, color, style) => {
         const text = labelText(value);
         if (!text) return "";
@@ -234,17 +234,19 @@
         if (this.map.hasImage(id)) return "";
         const canvas = root.document.createElement("canvas"), context = canvas.getContext("2d");
         if (!context) return "";
-        context.font = "600 12px sans-serif";
-        const width = Math.min(250, Math.max(20, Math.ceil(context.measureText(text).width) + 10)), height = 21;
+        const font = style === "vehicle" ? "700 12px sans-serif" : "600 12px sans-serif";
+        context.font = font;
+        const width = Math.min(250, Math.max(style === "vehicle" ? 16 : 20, Math.ceil(context.measureText(text).width) + (style === "vehicle" ? 8 : 10))), height = style === "vehicle" ? 15 : 21;
         canvas.width = width * 2; canvas.height = height * 2;
-        context.scale(2, 2); context.font = "600 12px sans-serif";
+        context.scale(2, 2); context.font = font;
         if (style !== "text") {
-          context.fillStyle = "rgba(255,255,255,.94)";
+          context.fillStyle = style === "vehicle" ? "rgba(255,255,255,.98)" : "rgba(255,255,255,.94)";
           context.beginPath();
-          context.moveTo(4, 0); context.lineTo(width - 4, 0); context.quadraticCurveTo(width, 0, width, 4);
-          context.lineTo(width, height - 4); context.quadraticCurveTo(width, height, width - 4, height);
-          context.lineTo(4, height); context.quadraticCurveTo(0, height, 0, height - 4);
-          context.lineTo(0, 4); context.quadraticCurveTo(0, 0, 4, 0); context.fill();
+          const radius = style === "vehicle" ? 3 : 4;
+          context.moveTo(radius, 0); context.lineTo(width - radius, 0); context.quadraticCurveTo(width, 0, width, radius);
+          context.lineTo(width, height - radius); context.quadraticCurveTo(width, height, width - radius, height);
+          context.lineTo(radius, height); context.quadraticCurveTo(0, height, 0, height - radius);
+          context.lineTo(0, radius); context.quadraticCurveTo(0, 0, radius, 0); context.fill();
         }
         context.fillStyle = color; context.textBaseline = "middle"; context.textAlign = "center";
         if (style === "text") {
@@ -284,7 +286,9 @@
           if (!this.map.hasImage(candidate)) { id = candidate; break; }
         }
         if (!id) return "";
-        this.map.addImage(id, draw(), { pixelRatio: root.SloiVehicleMarkers.pixelRatio });
+        const image = draw();
+        if (!image) return "";
+        this.map.addImage(id, image, { pixelRatio: root.SloiVehicleMarkers.pixelRatio });
         session.vehicleImages.set(key, { id, image: this.map.getImage?.(id) });
         if (!session.vehicleCleanup) {
           session.vehicleCleanup = true;
@@ -351,6 +355,7 @@
           const pointLabelMinZoom = options.pointLabelMinZoom === undefined ? pointMinZoom : options.pointLabelMinZoom;
           const pointRadius = options.pointRadius === undefined ? 5 : options.pointRadius;
           const pointLabel = options.pointLabel === undefined ? null : options.pointLabel;
+          const pointLabelColorProperty = options.pointLabelColorProperty === undefined ? null : options.pointLabelColorProperty;
           const pointOpacity = options.pointOpacity === undefined ? null : options.pointOpacity;
           const colorProperty = options.colorProperty === undefined ? null : options.colorProperty;
           const pointLabelStyle = options.pointLabelStyle === undefined ? "badge" : options.pointLabelStyle;
@@ -361,20 +366,27 @@
           const pointIconSize = options.pointIconSize === undefined ? .65 : options.pointIconSize;
           const pointHeading = options.pointHeading === undefined ? "heading" : options.pointHeading;
           const pointType = options.pointType === undefined ? "vehicleType" : options.pointType;
+          const pointTransitionMs = options.pointTransitionMs === undefined ? 0 : options.pointTransitionMs;
+          if (!Number.isFinite(pointTransitionMs) || pointTransitionMs < 0 || pointTransitionMs > 16000
+            || (pointTransitionMs > 0 && pointMarker !== "vehicle")) throw new Error("Некорректная длительность движения транспорта");
           if (!["circle", "vehicle"].includes(pointMarker)) throw new Error("Некорректный вид маркера точек");
-          if (!["badge", "text"].includes(pointLabelStyle)) throw new Error("Некорректный стиль подписи точек");
+          if (!["badge", "text", "vehicle"].includes(pointLabelStyle)) throw new Error("Некорректный стиль подписи точек");
           if (!Number.isFinite(pointMinZoom) || pointMinZoom < 0 || pointMinZoom > 24) throw new Error("Некорректный масштаб точек слоя");
           if (!Number.isFinite(pointLabelMinZoom) || pointLabelMinZoom < pointMinZoom || pointLabelMinZoom > 24) throw new Error("Некорректный масштаб подписей слоя");
           if (!Number.isFinite(pointRadius) || pointRadius < 2 || pointRadius > 16) throw new Error("Некорректный размер точек слоя");
-          if (pointIconBackground !== "none" && (pointIconBackground !== "rounded" || pointIcon === null || pointIcon === "metro")) throw new Error("Некорректный фон пиктограммы точек");
+          if (pointIconBackground !== "none" && (pointIconBackground !== "rounded" || !["bus", "tram", "trolley"].includes(pointIcon))) {
+            throw new Error("Некорректный фон пиктограммы точек");
+          }
           if (pointIcon !== null) {
             if (pointMarker !== "circle" || !pointIconTypes.has(pointIcon)) throw new Error("Некорректная пиктограмма точек слоя");
             if (!Number.isFinite(pointIconMinZoom) || pointIconMinZoom < pointMinZoom || pointIconMinZoom > 24) throw new Error("Некорректный масштаб пиктограмм точек");
             if (!Number.isFinite(pointIconSize) || pointIconSize < .3 || pointIconSize > 1) throw new Error("Некорректный размер пиктограмм точек");
           }
-          for (const property of [pointLabel, pointOpacity, colorProperty, ...(pointMarker === "vehicle" ? [pointHeading, pointType] : [])]) if (property !== null && (typeof property !== "string" || !/^[a-zA-Z_][a-zA-Z0-9_]{0,31}$/.test(property))) throw new Error("Некорректное поле оформления точек");
+          for (const property of [pointLabel, pointLabelColorProperty, pointOpacity, colorProperty, ...(pointMarker === "vehicle" ? [pointHeading, pointType] : [])]) if (property !== null && (typeof property !== "string" || !/^[a-zA-Z_][a-zA-Z0-9_]{0,31}$/.test(property))) throw new Error("Некорректное поле оформления точек");
           if (pointMarker === "vehicle" && (pointHeading === null || pointType === null)) throw new Error("Требуются поля вида и направления транспорта");
           if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color) || typeof opacity !== "number" || !Number.isFinite(opacity) || opacity < 0 || opacity > 1) throw new Error("Некорректное оформление GeoJSON");
+          const previousMotion = session.sources.get(localId)?.motion;
+          if (previousMotion) safe = previousMotion.prepare(safe);
           // Normalize before creating paint expressions or canvas images. A
           // malformed feature value falls back to the module's literal color.
           const featureColor = feature => colorProperty !== null && typeof feature?.properties?.[colorProperty] === "string" && /^#[0-9a-fA-F]{6}$/.test(feature.properties[colorProperty]) ? feature.properties[colorProperty].toLowerCase() : color;
@@ -382,6 +394,12 @@
             for (const feature of safe.features) if (feature?.type === "Feature") feature.properties = { ...feature.properties, __moduleColor: featureColor(feature) };
           }
           const paintColor = colorProperty === null ? color : ["coalesce", ["get", "__moduleColor"], color];
+          const featureLabelColor = feature => pointLabelColorProperty !== null && typeof feature?.properties?.[pointLabelColorProperty] === "string"
+            && /^#[0-9a-fA-F]{6}$/.test(feature.properties[pointLabelColorProperty]) ? feature.properties[pointLabelColorProperty].toLowerCase() : featureColor(feature);
+          if (pointLabelColorProperty !== null) for (const feature of safe.features || []) {
+            if (feature?.type === "Feature") feature.properties = { ...feature.properties, __moduleLabelColor: featureLabelColor(feature) };
+          }
+          const paintLabelColor = pointLabelColorProperty === null ? paintColor : ["coalesce", ["get", "__moduleLabelColor"], paintColor];
           const markerSprites = root.SloiVehicleMarkers;
           const supportsImages = typeof root.document?.createElement === "function" && typeof this.map.addImage === "function"
             && typeof this.map.hasImage === "function" && typeof this.map.removeImage === "function";
@@ -417,7 +435,7 @@
               const actualTint = customBody ? tint : fallback === common[String(directed)] ? neutralColor : color;
               const foreground = markerSprites.foreground(actualTint);
               const icon = markerSprites.types.includes(type) ? iconImage(type, foreground) : "";
-              feature.properties = { ...feature.properties, __moduleVehicleBodyImage: body, __moduleVehicleIconImage: icon, __moduleVehicleHeading: course ?? 0 };
+              feature.properties = { ...feature.properties, __moduleVehicleBodyImage: body, __moduleVehicleIconImage: icon, __moduleVehicleHeading: course ?? 0, __moduleVehicleHeadingKnown: course !== null };
             }
           }
           // Locally rasterized badges avoid a dependency on the basemap's font
@@ -425,10 +443,10 @@
           const rasterLabels = pointLabel !== null && supportsImages;
           if (rasterLabels && safe?.type === "FeatureCollection" && Array.isArray(safe.features)) {
             session.labelKeys.set(localId, new Set(safe.features.filter(feature => feature?.geometry?.type === "Point")
-              .filter(feature => labelText(feature.properties?.[pointLabel])).map(feature => labelKey(labelText(feature.properties?.[pointLabel]), featureColor(feature), pointLabelStyle))));
+              .filter(feature => labelText(feature.properties?.[pointLabel])).map(feature => labelKey(labelText(feature.properties?.[pointLabel]), featureLabelColor(feature), pointLabelStyle))));
             pruneLabels();
             for (const feature of safe.features) if (feature?.geometry?.type === "Point") {
-              feature.properties = { ...feature.properties, __moduleLabelImage: labelImage(feature.properties?.[pointLabel], featureColor(feature), pointLabelStyle) };
+              feature.properties = { ...feature.properties, __moduleLabelImage: labelImage(feature.properties?.[pointLabel], featureLabelColor(feature), pointLabelStyle) };
             }
             safe = json(safe, "GeoJSON", limits.maxGeoJsonBytes);
           }
@@ -440,7 +458,8 @@
           if (pointIcons) {
             const points = checked.data.features.filter(feature => ["Point", "MultiPoint"].includes(feature.geometry.type));
             const colors = points.map(featureColor);
-            const tints = colors.map(color => pointIconBackground === "rounded" ? color.toLowerCase() : markerSprites.foreground(color));
+            const useFeatureTint = pointIconBackground === "rounded" || pointIcon === "metro-plain";
+            const tints = colors.map(color => useFeatureTint ? color.toLowerCase() : markerSprites.foreground(color));
             session.vehicleKeys.set(localId, new Set(tints.map(tint => iconKey(pointIcon, tint, pointIconBackground))));
             pruneVehicleImages();
             for (const [index, feature] of points.entries()) {
@@ -450,15 +469,21 @@
             checked.data = json(checked.data, "GeoJSON", limits.maxGeoJsonBytes);
           }
           const pointAlpha = pointOpacity === null ? opacity : ["*", opacity, ["min", 1, ["max", 0, ["to-number", ["get", pointOpacity], 1]]]];
+          const pointIconImage = ["get", "__modulePointIconImage"];
+          // Keep the ordinary point if the entrance symbol cannot be drawn.
+          const circleAlpha = pointIcons && (pointIcon === "metro-plain" || pointIconBackground === "rounded")
+            ? ["step", ["zoom"], pointAlpha, pointIconMinZoom, ["case", ["==", pointIconImage, ""], pointAlpha, 0]]
+            : pointAlpha;
           const id = `module-${entry.manifest.id}:${localId}`;
           let record = session.sources.get(localId);
+          const existingSource = Boolean(record);
           if (!record) {
             if (session.sources.size >= limits.maxSources) throw new Error("Достигнут лимит источников модуля");
             const source = `${id}-source`;
             const iconLayer = vehicleMarkers ? `${id}-vehicle-icon` : pointIcons ? `${id}-point-icon` : null;
             record = {
               source, layers: [`${id}-fill`, `${id}-line`, `${id}-point`], pointLabel, pointMarker, vehicleMarkers,
-              pointIcon, pointIcons, pointIconBackground, pointIconMinZoom, pointIconSize, iconLayer, ownedSource: null, ownedLayers: [],
+              pointIcon, pointIcons, pointIconBackground, pointIconMinZoom, pointIconSize, iconLayer, ownedSource: null, ownedLayers: [], motion: null, pointLabelColorProperty, pointLabelStyle,
             };
             if (pointLabel !== null) record.layers.push(`${id}-label`);
             if (iconLayer) record.layers.push(iconLayer);
@@ -480,16 +505,16 @@
                     "icon-rotation-alignment": "map", "icon-pitch-alignment": "viewport", "icon-keep-upright": false, "icon-allow-overlap": true, "icon-ignore-placement": true },
                   paint: { "icon-opacity": pointAlpha } }
                   : { id: record.layers[2], type: "circle", source, minzoom: pointMinZoom, filter: ["==", ["geometry-type"], "Point"],
-                    paint: { "circle-color": paintColor, "circle-opacity": pointAlpha, "circle-radius": pointRadius, "circle-stroke-color": "#ffffff",
-                      "circle-stroke-width": 1.5, "circle-stroke-opacity": pointAlpha, "circle-pitch-alignment": "viewport", "circle-pitch-scale": "viewport" } },
+                    paint: { "circle-color": paintColor, "circle-opacity": circleAlpha, "circle-radius": pointRadius, "circle-stroke-color": "#ffffff",
+                      "circle-stroke-width": 1.5, "circle-stroke-opacity": circleAlpha, "circle-pitch-alignment": "viewport", "circle-pitch-scale": "viewport" } },
               ];
               if (pointLabel !== null) specs.push(rasterLabels ? { id: record.layers[3], type: "symbol", source, minzoom: pointLabelMinZoom,
-                filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "__moduleLabelImage"], ""]], layout: { "icon-image": ["get", "__moduleLabelImage"], "icon-offset": [0, vehicleMarkers ? 20 : 10], "icon-anchor": "top", "icon-allow-overlap": false },
+                filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "__moduleLabelImage"], ""]], layout: { "icon-image": ["get", "__moduleLabelImage"], "icon-offset": pointLabelStyle === "vehicle" ? [-10, -10] : [0, vehicleMarkers ? 20 : 10], "icon-anchor": pointLabelStyle === "vehicle" ? "bottom-right" : "top", "icon-rotation-alignment": "viewport", "icon-pitch-alignment": "viewport", "icon-allow-overlap": false },
                 paint: { "icon-opacity": pointAlpha } } : { id: record.layers[3], type: "symbol", source, minzoom: pointLabelMinZoom,
                 filter: ["==", ["geometry-type"], "Point"], layout: { "text-field": ["to-string", ["get", pointLabel]], "text-font": ["Noto Sans Regular"], "text-size": 12, "text-offset": [0, vehicleMarkers ? 1.8 : 1.1], "text-anchor": "top", "text-allow-overlap": false, "text-optional": true },
-                paint: { "text-color": paintColor, "text-opacity": pointAlpha, "text-halo-color": "#ffffff", "text-halo-width": 1.5 } });
+                paint: { "text-color": paintLabelColor, "text-opacity": pointAlpha, "text-halo-color": "#ffffff", "text-halo-width": 1.5 } });
               if (record.iconLayer) {
-                const image = ["get", vehicleMarkers ? "__moduleVehicleIconImage" : "__modulePointIconImage"];
+                const image = vehicleMarkers ? ["get", "__moduleVehicleIconImage"] : pointIconImage;
                 specs.push({
                   id: record.iconLayer, type: "symbol", source, minzoom: vehicleMarkers ? pointMinZoom : pointIconMinZoom,
                   filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", image, ""]],
@@ -506,13 +531,14 @@
             } catch (error) { this.fail(entry, session, error); throw error; }
           } else {
             try {
+              if (record.pointLabelColorProperty !== pointLabelColorProperty || record.pointLabelStyle !== pointLabelStyle) throw new Error("Стиль подписи источника нельзя менять без перезапуска модуля");
               if (record.pointLabel !== pointLabel) throw new Error("Поле подписи источника нельзя менять без перезапуска модуля");
               if (record.pointMarker !== pointMarker || record.vehicleMarkers !== vehicleMarkers) throw new Error("Вид маркера источника нельзя менять без перезапуска модуля");
               if (record.pointIcon !== pointIcon || record.pointIcons !== pointIcons || record.pointIconBackground !== pointIconBackground
                 || (pointIcon !== null && (record.pointIconMinZoom !== pointIconMinZoom || record.pointIconSize !== pointIconSize))) {
                 throw new Error("Пиктограмму источника нельзя менять без перезапуска модуля");
               }
-              this.map.getSource(record.source).setData(checked.data);
+
               for (const [index, property] of ["fill", "line", "circle"].entries()) {
                 if (index === 2 && vehicleMarkers) continue;
                 this.map.setPaintProperty(record.layers[index], `${property}-color`, paintColor);
@@ -521,20 +547,55 @@
               if (vehicleMarkers) {
                 this.map.setPaintProperty(record.layers[2], "icon-opacity", pointAlpha);
               } else {
-                this.map.setPaintProperty(record.layers[2], "circle-opacity", pointAlpha);
-                this.map.setPaintProperty(record.layers[2], "circle-stroke-opacity", pointAlpha);
+                this.map.setPaintProperty(record.layers[2], "circle-opacity", circleAlpha);
+                this.map.setPaintProperty(record.layers[2], "circle-stroke-opacity", circleAlpha);
                 this.map.setPaintProperty(record.layers[2], "circle-radius", pointRadius);
               }
               if (record.iconLayer) this.map.setPaintProperty(record.iconLayer, "icon-opacity", pointAlpha);
               if (pointLabel !== null) {
                 if (record.rasterLabels) this.map.setPaintProperty(record.layers[3], "icon-opacity", pointAlpha);
                 else {
-                  this.map.setPaintProperty(record.layers[3], "text-color", paintColor);
+                  this.map.setPaintProperty(record.layers[3], "text-color", paintLabelColor);
                   this.map.setPaintProperty(record.layers[3], "text-opacity", pointAlpha);
                 }
               }
             } catch (error) { this.fail(entry, session, error); throw error; }
           }
+          if (!record.motion && pointTransitionMs > 0 && typeof root.SloiGeoJsonMotion?.create === "function") {
+            const owned = record;
+            let queued = null, submittedEmpty = checked.data.features.length === 0;
+            const publish = frame => {
+              if (entry.session !== session || session.controller.signal.aborted
+                || this.map.getSource(owned.source) !== owned.ownedSource) {
+                owned.motion?.dispose(); queued = null;
+                return;
+              }
+              const empty = frame.features.length === 0;
+              if (empty && submittedEmpty) { queued = null; return; }
+              // A slow worker needs only the most recent animation frame.
+              // Send clears once immediately so stale vehicles cannot linger.
+              if (!empty && owned.ownedSource.loaded?.() === false) { queued = frame; return; }
+              queued = null; submittedEmpty = empty;
+              try { owned.ownedSource.setData(frame); }
+              catch (error) { this.fail(entry, session, error); }
+            };
+            const flush = event => {
+              if (event.sourceId === owned.source && queued && owned.ownedSource.loaded?.() !== false) publish(queued);
+            };
+            record.motion = root.SloiGeoJsonMotion.create({
+              document: root.document, headingProperty: pointHeading, typeProperty: pointType,
+              matchMedia: root.matchMedia?.bind(root), onFrame: publish,
+            });
+            this.map.on("sourcedata", flush);
+            this.map.on("dataabort", flush);
+            this.map.on("error", flush);
+            session.cleanups.push(() => {
+              queued = null; owned.motion?.dispose();
+              this.map.off("sourcedata", flush); this.map.off("dataabort", flush); this.map.off("error", flush);
+            });
+          }
+          if (record.motion) record.motion.update(checked.data, pointTransitionMs);
+          else if (existingSource) this.map.getSource(record.source).setData(checked.data);
           record.bounds = checked.bounds;
           return Object.freeze({ sourceId: record.source, layerIds: Object.freeze([...record.layers]) });
         },

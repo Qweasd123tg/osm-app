@@ -49,7 +49,7 @@ assert.equal(request.searchParams.get('transport'),'bus,tram,trolley');assert.eq
 assert.equal(h.sources.size,3);assert.equal(h.layers.size,13);assert.equal(h.data().features[0].properties.name,'49 · Автобус');
 assert.equal(h.data().features[0].properties.label,'49');
 assert.deepEqual(['bus','tram','trolley'].map(type=>h.data(type).features[0].properties.color),
-  ['#1a73f0','#eb5a2b','#e9a300'],'Default markers use a distinct color for each transport mode');
+  ['#1a73f0','#eb5a2b','#c48900'],'Default markers use a distinct color for each transport mode');
 assert.equal(h.data().features[0].properties.kind,'vehicle');assert.equal(h.data().features[0].properties.timeConfirmed,true);
 assert.equal(h.data().features[0].properties.statusText,'Позиция от 16:22:29 · Получено 16:22:37 · Курс 341°');
 assert.equal(h.layers.get('module-spb-live:bus-label').layout['text-field'][1][1],'label');
@@ -79,6 +79,10 @@ parsed=h.api.normalizeVehicles([vehicle(1,'bus','4А'),vehicle(2,'bus','49')],{b
 assert.equal(parsed.bus.features.length,1);assert.equal(parsed.bus.features[0].properties.route,'4А');
 parsed=h.api.normalizeVehicles([vehicle(1,'bus','49',''),vehicle(2,'bus','49','2026-11-17T18:22:29Z'),vehicle(3,'bus','49','2026-11-17T12:00:00Z')],{bounds,types,receivedAt:AT});
 assert.equal(parsed.bus.features.length,2);assert(parsed.bus.features.every(f=>f.properties.timeConfirmed===false));
+const inferred=h.api.normalizeVehicles([vehicle(88,'bus','49',new Date(AT+3*3600000).toISOString())],{bounds,types,receivedAt:AT});
+assert.equal(inferred.bus.features[0].properties.observationTime,new Date(AT).toISOString(),'Motion orders the corrected observation time, not the raw Moscow-as-Z string');
+const badClock=h.api.normalizeVehicles([vehicle(88,'bus','49',new Date(AT+3600000).toISOString())],{bounds,types,receivedAt:AT});
+assert.equal(badClock.bus.features[0].properties.observationTime,'','Untrusted future time cannot poison the interpolation high-water mark');
 assert.equal(h.api.viewport({zoom:11,bounds}),null);assert.equal(h.api.viewport({zoom:15,bounds:[[-1,50],[0,51]]}),null);
 assert.throws(()=>h.api.normalizeVehicles({}, {bounds,types,receivedAt:AT}),/несовместимый/);h.host.dispose();
 
@@ -125,13 +129,13 @@ assert.equal(h.data().features.length,1);assert.equal(h.data('tram').features.le
 assert.equal(h.data().features[0].properties.color,'#1565c0');
 assert.equal(h.data().features[0].properties.__moduleColor,'#1565c0');
 assert.deepEqual(plain(h.layers.get('module-spb-live:bus-point').paint['circle-color']),['coalesce',['get','__moduleColor'],'#1a73f0']);
-assert.deepEqual([...h.host.entry('spb-live').session.labelImages.keys()].sort(),['#006c4c|17','#1565c0|49','#b3261e|49']);
+assert.deepEqual([...h.host.entry('spb-live').session.labelImages.keys()].sort(),['vehicle|#006c4c|17','vehicle|#1565c0|49','vehicle|#b3261e|49']);
 assert.equal(h.images.size,3,'Only the three visible route badges are allocated');
 const firstColorImages=new Map(h.images);
 await h.host.configure('spb-live',{routes:JSON.stringify([{type:'bus',number:'49',color:'#ff8800'}])});
 assert.equal(new URL(h.requests.at(-1).url).searchParams.get('transport'),'bus');
 assert.equal(h.data().features[0].properties.color,'#ff8800');assert.equal(h.data('tram').features.length,0);
-assert.deepEqual([...h.host.entry('spb-live').session.labelImages.keys()],['#ff8800|49']);
+assert.deepEqual([...h.host.entry('spb-live').session.labelImages.keys()],['vehicle|#ff8800|49']);
 assert.equal(h.images.size,1);assert([...firstColorImages].every(([id,image])=>h.images.get(id)!==image));
 await h.host.configure('spb-live',{routes:'[]'});const emptyRequests=h.requests.length;
 assert.equal(h.images.size,0);await h.advance(64000);assert.equal(h.requests.length,emptyRequests);

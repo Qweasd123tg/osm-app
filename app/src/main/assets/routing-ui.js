@@ -20,7 +20,7 @@
     pin: '<path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.5"/>',
   };
   function icon(kind) {
-    const transport = root.SloiTransportSymbols?.create(kind === "subway" ? "metro" : kind, "routing-icon");
+    const transport = root.SloiTransportSymbols?.create(kind === "subway" ? "metro-plain" : kind, "routing-icon");
     if (transport) return transport;
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "routing-icon"); svg.setAttribute("viewBox", "0 0 24 24");

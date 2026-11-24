@@ -5,9 +5,9 @@
   const POLL_MS = 16000, MAX_BYTES = 2 * 1024 * 1024, MAX_ROWS = 5000;
   const MIN_ZOOM = 12, MAX_AGE_MS = 5 * 60 * 1000, MAX_PRESET_ROUTES = 20, MAX_ROUTES_SETTING = 8192;
   const TYPES = Object.freeze({
-    bus: { name: "Автобус", prefix: "А", color: "#1a73f0" },
-    tram: { name: "Трамвай", prefix: "Т", color: "#eb5a2b" },
-    trolley: { name: "Троллейбус", prefix: "Тб", color: "#e9a300" },
+    bus: { name: "Автобус", prefix: "А", color: "#1a73f0", labelColor: "#436abd" },
+    tram: { name: "Трамвай", prefix: "Т", color: "#eb5a2b", labelColor: "#eb5a2b" },
+    trolley: { name: "Троллейбус", prefix: "Тб", color: "#c48900", labelColor: "#71a73d" },
   });
   const EMPTY = () => ({ type: "FeatureCollection", features: [] });
   const cancelled = () => Object.assign(new Error("Загрузка отменена"), { name: "AbortError" });
@@ -165,8 +165,8 @@
       const opacity = validTime && age > 60000 ? .4 : confirmed ? .95 : .65;
       result[type].features.push({ type: "Feature", id: `${type}:${id}`, properties: {
         kind: "vehicle", name: `${routeName} · ${TYPES[type].name}`, label: routeName, statusText,
-        color: chosen?.color || TYPES[type].color, vehicleType: type,
-        opacity, heading, rawTimestamp, receivedAt, timeConfirmed: confirmed, route: routeName, vehicleId: id,
+        color: chosen?.color || TYPES[type].color, labelColor: chosen?.color || TYPES[type].labelColor, vehicleType: type,
+        opacity, heading, rawTimestamp, observationTime: validTime ? new Date(adjusted).toISOString() : "", receivedAt, timeConfirmed: confirmed, route: routeName, vehicleId: id,
       }, geometry: { type: "Point", coordinates: point } });
       seen.add(`${type}:${id}`);
     }
@@ -180,7 +180,7 @@
     if (routes === null && (typeof ctx.settings.route !== "string" || ctx.settings.route.trim().length > 12)) throw new Error("Номер маршрута не должен быть длиннее 12 символов");
     let generation = 0, request = null, timer = null, disposed = false;
     const render = data => {
-      for (const type of Object.keys(TYPES)) ctx.setGeoJson(type, data[type], { color: TYPES[type].color, colorProperty: "color", opacity: 1, pointMinZoom: MIN_ZOOM, pointLabelMinZoom: MIN_ZOOM + 1, pointRadius: 7, pointMarker: "vehicle", pointHeading: "heading", pointType: "vehicleType", pointLabel: "label", pointOpacity: "opacity" });
+      for (const type of Object.keys(TYPES)) ctx.setGeoJson(type, data[type], { color: TYPES[type].color, colorProperty: "color", opacity: 1, pointMinZoom: MIN_ZOOM, pointLabelMinZoom: MIN_ZOOM + 1, pointRadius: 7, pointMarker: "vehicle", pointTransitionMs: POLL_MS, pointHeading: "heading", pointType: "vehicleType", pointLabel: "label", pointLabelStyle: "vehicle", pointLabelColorProperty: "labelColor", pointOpacity: "opacity" });
     };
     const clear = () => render(Object.fromEntries(Object.keys(TYPES).map(type => [type, EMPTY()])));
     const invalidate = () => { generation++; clearTimeout(timer); timer = null; request?.abort(); request = null; };
@@ -238,7 +238,7 @@
   }
 
   function register(host) {
-    host.register({ id: "spb-live", apiVersion: 1, version: "1.2.0", title: "Транспорт сейчас", description: "Позиции автобусов, трамваев и троллейбусов Петербурга. Обновление каждые 16 секунд в видимой области от масштаба 12.", capabilities: ["geojson"], defaults: { bus: true, tram: true, trolley: true, route: "", routes: "" } }, activateVehicles);
+    host.register({ id: "spb-live", apiVersion: 1, version: "1.3.0", title: "Транспорт сейчас", description: "Позиции автобусов, трамваев и троллейбусов Петербурга. Обновление каждые 16 секунд в видимой области от масштаба 12.", capabilities: ["geojson"], defaults: { bus: true, tram: true, trolley: true, route: "", routes: "" } }, activateVehicles);
   }
   const controls = Object.freeze({
     "spb-live": Object.freeze([

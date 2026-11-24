@@ -82,12 +82,12 @@ def main():
                       count++;if(!tip||distance>tip.distance)tip={dx,dy,distance};
                     }
                     // The glyph occupies the center. Sample the red part of
-                    // the 12.8px circle in every direction to catch flattening.
+                    // the 11.4px circle in every direction to catch flattening.
                     const ring = [];
                     for(let i=0;i<16;i++){
                       const angle=i*Math.PI/8;
-                      const x=Math.floor((anchor.x+11*Math.cos(angle))*sx)-x0;
-                      const y=Math.floor(gl.drawingBufferHeight-(anchor.y+11*Math.sin(angle))*sy)-y0;
+                      const x=Math.floor((anchor.x+10*Math.cos(angle))*sx)-x0;
+                      const y=Math.floor(gl.drawingBufferHeight-(anchor.y+10*Math.sin(angle))*sy)-y0;
                       ring.push(isBody(x,y));
                     }
                     resolve({count,tip,eastAngle,ring});
@@ -96,7 +96,7 @@ def main():
                 if not result['count']: page.screenshot(path='/tmp/sloi-vehicle-pixel-failure.png')
                 assert result['count'] > 20 and result['tip'], (heading,bearing,pitch,result)
                 assert sum(result['ring']) >= 15, (heading,bearing,pitch,result)
-                assert 15 < result['tip']['distance'] < 20, (heading,bearing,pitch,result)
+                assert 13.5 < result['tip']['distance'] < 18, (heading,bearing,pitch,result)
                 angle = math.degrees(math.atan2(result['tip']['dx'], -result['tip']['dy'])) % 360
                 expected = (heading + result['eastAngle']) % 360
                 error = abs((angle-expected+180)%360-180)

@@ -68,9 +68,13 @@ assert.equal(new Set(writes[0][1].features.map(item => item.properties.color)).s
 assert.equal(writes[1][2].pointLabelStyle, 'text');
 assert.equal(writes[1][2].colorProperty, 'color');
 assert.equal(writes[1][2].pointRadius, 7);
-assert.equal(writes[1][2].pointIcon, 'metro');
-assert.equal(writes[1][2].pointIconMinZoom, 12);
+assert.equal(writes[1][2].pointIcon, undefined);
+assert.equal(writes[1][2].pointMinZoom, 10);
+assert.equal(writes[1][2].pointLabelMinZoom, 12);
 assert.equal(writes[2][2].pointMinZoom, 15);
+assert.equal(writes[2][2].pointIcon, 'metro-plain');
+assert.equal(writes[2][2].pointIconSize, 1);
+assert.equal(writes[2][2].color, '#005da8');
 assert.equal(writes[1][1].features.find(item => item.properties.name === 'Парк Победы').properties.opacity, .5);
 assert.equal(writes[0][1].features[5].properties.kind, 'metro_line');
 writes = await activate('6', false);

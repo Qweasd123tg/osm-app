@@ -60,6 +60,7 @@ for (const relative of [
   "offline-basemap.js",
   "search-controller.js",
   "place-names.js",
+  "geojson-motion.js",
   "module-host.js",
   "extension-storage.js",
   "transport-symbols.js",

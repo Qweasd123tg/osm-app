@@ -164,9 +164,11 @@
     ctx.setGeoJson("stations", result.stations, {
       color: "#6f5499", colorProperty: "color", opacity: 1, pointOpacity: "opacity",
       pointMinZoom: 10, pointLabelMinZoom: 12, pointRadius: 7, pointLabel: "label", pointLabelStyle: "text",
-      pointIcon: "metro", pointIconMinZoom: 12, pointIconSize: .65,
     });
-    ctx.setGeoJson("entrances", result.entrances, { color: "#6f5499", colorProperty: "color", opacity: .8, pointMinZoom: 15, pointRadius: 3 });
+    ctx.setGeoJson("entrances", result.entrances, {
+      color: root.document?.documentElement?.dataset?.theme === "dark" ? "#326995" : "#005da8", opacity: 1, pointMinZoom: 15, pointRadius: 3,
+      pointIcon: "metro-plain", pointIconSize: 1,
+    });
   }
   function register(host) {
     host.register({ id: "spb-metro", apiVersion: 1, version: "1.1.0", title: "Метро Петербурга", description: "Шесть линий, станции и входы. Схема доступна без сети.", capabilities: ["geojson"], defaults: { entrances: true, selectedLine: "" } }, activate);

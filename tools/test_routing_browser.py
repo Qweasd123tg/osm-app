@@ -212,7 +212,7 @@ def main():
             page.locator(".routing-parameters > summary").click()
             assert page.locator('.routing-transport-options input:checked').count() == 4
             assert page.locator('.routing-transport-type svg').count() == 4
-            assert page.locator('.routing-transport-type:has(#routing-transport-subway) svg path').get_attribute('d') == page.evaluate("SloiTransportSymbols.get('metro').paths[0].d")
+            assert page.locator('.routing-transport-type:has(#routing-transport-subway) svg path').get_attribute('d') == page.evaluate("SloiTransportSymbols.get('metro-plain').paths[0].d")
             page.locator("#routing-direct-only").check()
             page.locator(".routing-submit").click()
             page.locator(".routing-option").wait_for()
