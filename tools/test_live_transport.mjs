@@ -49,6 +49,7 @@ assert.equal(request.searchParams.get('transport'),'bus,tram,trolley');assert.eq
 assert.equal(h.sources.size,3);assert.equal(h.layers.size,13);assert.equal(h.data().features[0].properties.name,'49 · Автобус');
 assert.equal(h.data().features[0].properties.label,'49');assert.equal(h.data().features[0].properties.color,'#b76c18');
 assert.equal(h.data().features[0].properties.kind,'vehicle');assert.equal(h.data().features[0].properties.timeConfirmed,true);
+assert.equal(h.data().features[0].properties.statusText,'Позиция от 16:22:29 · Получено 16:22:37 · Курс 341°');
 assert.equal(h.layers.get('module-spb-live:bus-label').layout['text-field'][1][1],'label');
 assert.equal(h.layers.get('module-spb-live:bus-point').minzoom,12);
 assert.equal(h.layers.get('module-spb-live:bus-label').minzoom,13);
@@ -171,11 +172,135 @@ await h.advance(64000);assert.equal(h.requests.length,suspendedCount);
 await h.host.setSuspended(false);assert.equal(h.requests.length,suspendedCount+1);
 h.host.disable('spb-live');assert.equal(h.sources.size,0);assert.equal(h.visibility.size,0);assert.equal(h.timers.size,0);h.host.dispose();
 
-// Errors after activation remove positions and surface a retryable module error.
-h=harness(async(_u,_o,n)=>n===1?response([vehicle(1)]):response({},503));
-await h.host.enable('spb-live');await h.advance(16000);
-assert.equal(h.host.get('spb-live').status,'error');assert.match(h.host.get('spb-live').error,/503/);assert.equal(h.sources.size,0);assert.equal(h.timers.size,0);h.host.dispose();
-for(const make of [()=>new Response('{broken'),()=>response({}),()=>new Response('x',{headers:{'content-length':String(3*1024*1024)}}),()=>new Response('x'.repeat(2*1024*1024+1))]){
+// A mid-session outage removes old positions while the layer stays enabled.
+// Persistent failures maintain one poll timer and the next fresh reply clears the warning.
+const state = h => h.host.get('spb-live');
+function expectRetry(h) {
+  assert.equal(state(h).enabled,true);
+  assert.equal(state(h).status,'ready');
+  assert.equal(state(h).error,null);
+  assert.match(state(h).warning,/Повторим автоматически/);
+  assert.equal(h.sources.size,3);
+  assert.equal(h.data().features.length,0);
+  assert.deepEqual([...h.timers.values()].map(timer=>timer.delay),[16000]);
+}
+h=harness(async(_u,_o,n)=>n===1 || n===4 ? response([vehicle(n)]) : response({},503));
+await h.host.enable('spb-live');
+assert.equal(h.data().features[0].properties.vehicleId,'1');
+await h.advance(16000);
+expectRetry(h);
+await h.advance(15999);
+assert.equal(h.requests.length,2);
+await h.advance(1);
+assert.equal(h.requests.length,3);
+expectRetry(h);
+await h.advance(16000);
+assert.equal(h.requests.length,4);
+assert.equal(h.data().features[0].properties.vehicleId,'4');
+assert.equal(state(h).warning,null);
+h.host.dispose();
+
+// Recoverable statuses, fetch rejection and interrupted stream reads also work
+// at startup, before the module has received a position.
+for (const firstFailure of [
+  ...[408,425,429,503].map(status=>()=>response({},status)),
+  ()=>{throw new TypeError('Failed to fetch');},
+  ()=>new Response(new ReadableStream({start(controller){controller.error(new TypeError('Connection reset'));}})),
+]) {
+  h=harness(async(_u,_o,n)=>n===1 ? firstFailure() : response([vehicle(n)]));
+  await h.host.enable('spb-live');
+  expectRetry(h);
+  await h.advance(16000);
+  assert.equal(h.requests.length,2);
+  assert.equal(h.data().features[0].properties.vehicleId,'2');
+  assert.equal(state(h).warning,null);
+  h.host.dispose();
+}
+h=harness(async(_u,{signal},n)=>n===1
+  ? new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}))
+  : response([vehicle(n)]));
+const timedOutEnable=h.host.enable('spb-live');
+await flush();
+await h.advance(7999);
+assert.equal(state(h).status,'loading');
+assert.equal(h.requests[0].options.signal.aborted,false);
+await h.advance(1);
+await timedOutEnable;
+assert.equal(h.requests[0].options.signal.aborted,true);
+expectRetry(h);
+await h.advance(16000);
+assert.equal(h.requests.length,2);
+assert.equal(state(h).warning,null);
+h.host.dispose();
+
+// Waiting retries stop when the layer or view no longer calls for live data.
+for (const stop of [
+  h=>h.hide(true),
+  h=>h.host.setSuspended(true),
+  h=>h.host.disable('spb-live'),
+  async h=>{h.map.zoom=11;h.map.move();await h.advance(120);},
+  async h=>{h.map.bounds=[[-1,50],[0,51]];h.map.move();await h.advance(120);},
+  h=>h.host.configure('spb-live',{routes:'[]'}),
+]) {
+  h=harness(async()=>response({},503));
+  await h.host.enable('spb-live');
+  expectRetry(h);
+  await stop(h);
+  assert.equal(h.timers.size,0);
+  assert.equal(state(h).warning,null);
+  await h.advance(64000);
+  assert.equal(h.requests.length,1);
+  h.host.dispose();
+}
+
+// Old in-flight retry results cannot change the warning or markers of a new preset.
+let rejectOldRetry;
+h=harness(async(_u,_o,n)=>{
+  if(n===1)return response({},503);
+  if(n===2)return new Promise((_resolve,reject)=>{rejectOldRetry=reject;});
+  return response([vehicle(n,'bus','1')]);
+});
+await h.host.enable('spb-live');
+await h.advance(16000);
+await h.host.configure('spb-live',{routes:JSON.stringify([{type:'bus',number:'1',color:'#aa2255'}])});
+assert.equal(h.requests[1].options.signal.aborted,true);
+assert.equal(h.data().features[0].properties.label,'1');
+assert.equal(state(h).warning,null);
+rejectOldRetry(new TypeError('Late network failure'));
+await flush();
+assert.equal(h.data().features[0].properties.label,'1');
+assert.equal(state(h).warning,null);
+assert.deepEqual([...h.timers.values()].map(timer=>timer.delay),[16000]);
+h.host.dispose();
+
+// Ignore a failure for a viewport that was left before moveend fired.
+let failOldView;
+h=harness(async(_u,_o,n)=>n===2 ? new Promise(resolve=>{failOldView=resolve;}) : response([vehicle(n,'bus','49',undefined,30.34)]));
+await h.host.enable('spb-live');
+await h.advance(16000);
+h.map.bounds=[[30.335,59.92],[30.35,59.94]];
+h.map.move();
+failOldView(response({},503));
+await flush();
+assert.equal(h.data().features[0].properties.vehicleId,'1');
+assert.equal(state(h).warning,null);
+await h.advance(120);
+assert.equal(h.data().features[0].properties.vehicleId,'3');
+assert.deepEqual([...h.timers.values()].map(timer=>timer.delay),[16000]);
+h.host.dispose();
+
+// Permanent HTTP errors and incompatible responses still stop the module.
+h=harness(async(_u,_o,n)=>n===2 ? response({},403) : response([vehicle(n)]));
+await h.host.enable('spb-live');
+await h.advance(16000);
+assert.equal(state(h).status,'error');
+assert.match(state(h).error,/403/);
+assert.equal(h.sources.size,0);
+assert.equal(h.timers.size,0);
+await h.host.enable('spb-live');
+assert.equal(h.data().features[0].properties.vehicleId,'3');
+h.host.dispose();
+for(const make of [()=>response({},404),()=>new Response('{broken'),()=>response({}),()=>new Response('x',{headers:{'content-length':String(3*1024*1024)}}),()=>new Response('x'.repeat(2*1024*1024+1))]){
   h=harness(async()=>make());await h.host.enable('spb-live');assert.equal(h.host.get('spb-live').status,'error');assert.equal(h.sources.size,0);assert.equal(h.timers.size,0);assert.equal(h.visibility.size,0);h.host.dispose();
 }
 
@@ -201,4 +326,4 @@ for(const options of [{pointLabel:['get','x']},{pointRadius:17},{pointOpacity:'x
   await h.host.enable('badges');assert.equal(h.host.get('badges').status,'error');assert.equal(h.sources.size,0);assert.equal(h.images.size,0);h.host.dispose();
 }
 
-console.log('Live transport OK: real feed contract,number-first labels,typed multiroute sets/custom colors,16s fresh polling,viewport cancellation,stale/clock safety,hidden/suspend cleanup,retryable errors,bounded data');
+console.log('Live transport OK: feed contract, typed presets, 16s polling and outage recovery, viewport cancellation, clock safety, permanent errors, cleanup and bounded data');

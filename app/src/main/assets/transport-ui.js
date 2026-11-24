@@ -68,6 +68,7 @@
       if (pending) return;
       const current = snapshot(tab === "metro" ? "spb-metro" : "spb-live");
       if (current?.error) message(current.error, true);
+      else if (current?.warning) message(current.warning);
       else if (current?.status === "loading") message("Загрузка…");
       else if (tab === "presets" && current?.enabled && map.getZoom() < 12) message("Приблизьте карту, чтобы увидеть транспорт");
       else message("");
@@ -199,6 +200,10 @@
       if (opened) moduleMessage();
       if (editor && editorMode === "list") renderEditorList();
     }
+    function refreshStatus() {
+      // A feed warning must not replace focused presets or metro stations.
+      if (!disposed && opened) moduleMessage();
+    }
     function open(next = "presets") {
       if (disposed) return;
       opener = document.activeElement; options.onOpen?.(); opened = true; panel.hidden = false;
@@ -297,7 +302,7 @@
     const onKey = event => { if (opened && event.key === "Escape") { event.preventDefault(); close(); } };
     document.addEventListener("keydown", onKey);
     refresh();
-    return Object.freeze({ open, close, isOpen: () => opened, back() { if (!opened) return false; close(); return true; }, refresh, showEditor,
+    return Object.freeze({ open, close, isOpen: () => opened, back() { if (!opened) return false; close(); return true; }, refresh, refreshStatus, showEditor,
       editorBack() { if (editorMode !== "edit") return false; renderEditorList(); return true; },
       dispose() { if (disposed) return; close(false); disposed = true; ++operation; catalogRequest?.abort(); unsubscribe?.(); map.off("moveend", onMove); document.removeEventListener("keydown", onKey); panel.remove(); editor?.replaceChildren(); },
     });

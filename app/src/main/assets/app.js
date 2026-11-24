@@ -325,7 +325,7 @@ systemTheme.addEventListener("change", applyTheme);
 applyTheme();
 
 const moduleCards = new Map();
-function renderModules(snapshots) {
+function renderModules(snapshots, change) {
   const statuses = { disabled: "Выключен", loading: "Загрузка…", ready: "На карте", paused: "Приостановлен", error: "Не удалось загрузить" };
   for (const module of snapshots) {
     let controls = moduleCards.get(module.id);
@@ -399,11 +399,11 @@ function renderModules(snapshots) {
     }
     controls.toggle.checked = module.enabled;
     controls.card.dataset.status = module.status;
-    controls.status.textContent = module.error || module.storageWarning || statuses[module.status];
+    controls.status.textContent = module.error || module.warning || module.storageWarning || statuses[module.status];
     if (module.id === "shadows" && module.enabled && elements.shadowStatus.textContent) controls.status.textContent = elements.shadowStatus.textContent;
-    controls.status.hidden = !module.error && !module.storageWarning && module.status !== "loading"
+    controls.status.hidden = !module.error && !module.warning && !module.storageWarning && module.status !== "loading"
       && ["Выключен", "На карте", "Приостановлен"].includes(controls.status.textContent);
-    controls.settingsStatus.textContent = module.error || module.storageWarning || "";
+    controls.settingsStatus.textContent = module.error || module.warning || module.storageWarning || "";
     controls.settingsStatus.hidden = !controls.settingsStatus.textContent;
     controls.settingsStatus.classList.toggle("is-error", Boolean(module.error));
     controls.retry.hidden = module.status !== "error";
@@ -417,7 +417,8 @@ function renderModules(snapshots) {
     }
   }
   updateActiveCount(snapshots);
-  transportUI?.refresh();
+  if (change === "warning") transportUI?.refreshStatus();
+  else transportUI?.refresh();
 }
 
 function initializeModules() {

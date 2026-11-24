@@ -66,7 +66,7 @@
       if (this.disposed) throw new Error("Host закрыт");
       const manifest = normalizeManifest(input);
       if (this.entries.has(manifest.id) || typeof factory !== "function") throw new Error("Модуль уже зарегистрирован или не имеет фабрики");
-      this.entries.set(manifest.id, { manifest, factory, settings: manifest.defaults, enabled: false, status: "disabled", error: null, session: null });
+      this.entries.set(manifest.id, { manifest, factory, settings: manifest.defaults, enabled: false, status: "disabled", error: null, warning: null, session: null });
       this.notify();
       return this;
     }
@@ -81,13 +81,13 @@
       const entry = this.entry(id);
       const boxes = [...(entry.session?.sources.values() || [])].map((source) => source.bounds).filter(Boolean);
       const bounds = boxes.length ? [[Math.min(...boxes.map((box) => box[0][0])), Math.min(...boxes.map((box) => box[0][1]))], [Math.max(...boxes.map((box) => box[1][0])), Math.max(...boxes.map((box) => box[1][1]))]] : null;
-      return Object.freeze({ ...entry.manifest, manifest: entry.manifest, settings: Object.freeze({ ...entry.settings }), enabled: entry.enabled, status: entry.status, error: entry.error, bounds, storageWarning: this.storageWarning });
+      return Object.freeze({ ...entry.manifest, manifest: entry.manifest, settings: Object.freeze({ ...entry.settings }), enabled: entry.enabled, status: entry.status, error: entry.error, warning: entry.warning, bounds, storageWarning: this.storageWarning });
     }
 
     list() { return [...this.entries.keys()].map((id) => this.get(id)); }
 
-    notify() {
-      try { this.onChange(this.list()); } catch (error) { if (root.console) root.console.warn("Module observer failed", error); }
+    notify(change) {
+      try { this.onChange(this.list(), change); } catch (error) { if (root.console) root.console.warn("Module observer failed", error); }
     }
 
     persist() {
@@ -179,6 +179,7 @@
     }
 
     stop(entry) {
+      entry.warning = null;
       const session = entry.session;
       if (!session) return;
       entry.session = null;
@@ -491,6 +492,13 @@
           }
           record.bounds = checked.bounds;
           return Object.freeze({ sourceId: record.source, layerIds: Object.freeze([...record.layers]) });
+        },
+        reportWarning: (message) => {
+          assertCurrent();
+          const warning = message == null ? null : String(message).trim().slice(0, 400) || null;
+          if (entry.warning === warning) return;
+          entry.warning = warning;
+          this.notify("warning");
         },
         reportError: (message) => {
           assertCurrent();

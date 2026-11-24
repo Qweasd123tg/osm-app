@@ -20,6 +20,9 @@
   const inside = (point, box) => point[0] >= box[0][0] && point[0] <= box[1][0] && point[1] >= box[0][1] && point[1] <= box[1][1];
   const hidden = () => root.document?.hidden === true;
   const routeKey = (type, route) => `${type}:${route.toLocaleLowerCase("ru")}`;
+  const clockFormatter = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const retryMessage = "Не удалось обновить транспорт. Повторим автоматически.";
+  class RetryableFeedError extends Error {}
 
   // A preset is a bounded list of typed route numbers. A bus and a tram with
   // the same number are independent selections; route destination is irrelevant.
@@ -68,14 +71,28 @@
     if (signal.aborted) throw cancelled();
     const url = new URL(path, ORIGIN);
     if (url.origin !== ORIGIN || url.protocol !== "https:") throw new Error("Недопустимый источник транспорта");
-    const controller = new AbortController(), cancel = () => controller.abort();
-    signal.addEventListener("abort", cancel, { once: true });
+    const controller = new AbortController();
+    const cancel = () => { clearTimeout(timer); controller.abort(); };
     const timer = setTimeout(cancel, 8000);
+    signal.addEventListener("abort", cancel, { once: true });
     try {
-      const response = await root.fetch(url.href, { signal: controller.signal, credentials: "omit", redirect: "error", cache: "no-store", headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error(`Источник транспорта: HTTP ${response.status}`);
+      let response;
+      try {
+        response = await root.fetch(url.href, { signal: controller.signal, credentials: "omit", redirect: "error", cache: "no-store", headers: { Accept: "application/json" } });
+      } catch (error) {
+        throw new RetryableFeedError("Источник транспорта недоступен. Проверьте соединение.", { cause: error });
+      }
+      if (controller.signal.aborted) throw cancelled();
+      if (!response.ok) {
+        response.body?.cancel().catch(() => {});
+        const status = response.status;
+        const message = `Источник транспорта: HTTP ${status}`;
+        if (status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)) throw new RetryableFeedError(message);
+        throw new Error(message);
+      }
       if (number(response.headers.get("content-length")) > MAX_BYTES) {
-        await response.body?.cancel().catch(() => {}); throw new Error("Ответ транспорта превышает 2 МиБ");
+        response.body?.cancel().catch(() => {});
+        throw new Error("Ответ транспорта превышает 2 МиБ");
       }
       if (!response.body?.getReader) throw new Error("Потоковая загрузка транспорта недоступна");
       const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", { fatal: true });
@@ -83,16 +100,19 @@
       try {
         while (true) {
           if (signal.aborted || controller.signal.aborted) throw cancelled();
-          const part = await reader.read();
+          let part;
+          try { part = await reader.read(); }
+          catch (error) { throw new RetryableFeedError("Загрузка позиций транспорта прервана", { cause: error }); }
+          if (controller.signal.aborted) throw cancelled();
           if (part.done) break;
           bytes += part.value.byteLength;
           if (bytes > MAX_BYTES) throw new Error("Ответ транспорта превышает 2 МиБ");
           body += decoder.decode(part.value, { stream: true });
         }
         body += decoder.decode();
-      } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+      } catch (error) { reader.cancel().catch(() => {}); throw error; }
       finally { reader.releaseLock(); }
-      if (signal.aborted) throw cancelled();
+      if (controller.signal.aborted) throw cancelled();
       let data;
       try { data = JSON.parse(body); } catch (_) { throw new Error("Источник транспорта вернул повреждённый JSON"); }
       if (!Array.isArray(data) || data.length > MAX_ROWS) throw new Error("Источник транспорта вернул несовместимый список");
@@ -100,14 +120,14 @@
       return { data, receivedAt, referenceTime: Number.isFinite(serverDate) && Math.abs(serverDate - receivedAt) < 10 * 60 * 1000 ? serverDate : receivedAt };
     } catch (error) {
       if (signal.aborted) throw cancelled();
-      if (controller.signal.aborted) throw new Error("Источник транспорта не ответил вовремя");
-      if (error instanceof Error && /^(Источник|Ответ|Потоковая|Недопустимый)/.test(error.message)) throw error;
-      throw new Error("Источник транспорта недоступен. Проверьте соединение.");
+      if (controller.signal.aborted) throw new RetryableFeedError("Источник транспорта не ответил вовремя", { cause: error });
+      throw error;
     } finally { clearTimeout(timer); signal.removeEventListener("abort", cancel); }
   }
 
   function clock(ms) {
-    return new Date(ms).toLocaleTimeString("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const date = new Date(ms);
+    return Number.isFinite(date.getTime()) ? clockFormatter.format(date) : "Invalid Date";
   }
   function normalizeVehicles(payload, { bounds, types, route = "", routes = null, receivedAt, referenceTime = receivedAt }) {
     if (!Array.isArray(payload) || payload.length > MAX_ROWS) throw new Error("Источник транспорта вернул несовместимый список");
@@ -122,6 +142,7 @@
     const inferredOffset = difference > 2.8 * 3600000 && difference < 3.2 * 3600000 ? 3 * 3600000 : 0;
     const result = Object.fromEntries(Object.keys(TYPES).map(type => [type, EMPTY()]));
     const seen = new Set(), wanted = text(route, 12).toLocaleLowerCase("ru");
+    let receivedTime;
     for (const item of payload) {
       const type = item?.TransportType;
       if (!Object.hasOwn(TYPES, type) || !types.includes(type)) continue;
@@ -139,7 +160,8 @@
         : `Время позиции не подтверждено${rawTimestamp ? ` (источник: ${rawTimestamp.slice(11, 19)})` : ""}`;
       const direction = number(item.Direction);
       const heading = direction !== null && direction >= 0 && direction < 360 ? direction : null;
-      const statusText = `${timeStatus} · Получено ${clock(receivedAt)}${heading === null ? "" : ` · Курс ${Math.round(heading)}°`}`;
+      receivedTime ??= clock(receivedAt);
+      const statusText = `${timeStatus} · Получено ${receivedTime}${heading === null ? "" : ` · Курс ${Math.round(heading)}°`}`;
       const opacity = validTime && age > 60000 ? .4 : confirmed ? .95 : .65;
       result[type].features.push({ type: "Feature", id: `${type}:${id}`, properties: {
         kind: "vehicle", name: `${routeName} · ${TYPES[type].name}`, label: routeName, statusText,
@@ -164,26 +186,38 @@
     const invalidate = () => { generation++; clearTimeout(timer); timer = null; request?.abort(); request = null; };
     const fail = error => {
       if (disposed || ctx.signal.aborted || error?.name === "AbortError") return;
-      clear();
-      if (ctx.reportError) ctx.reportError(error.message || "Источник позиций транспорта недоступен");
+      ctx.reportError(error?.message || "Источник позиций транспорта недоступен");
     };
     async function refresh(view = ctx.getView()) {
       invalidate();
       if (disposed || ctx.signal.aborted) return;
       const current = generation, bounds = viewport(view), viewKey = key(view);
-      if (hidden() || !bounds || !types.length) { clear(); return; }
+      if (hidden() || !bounds || !types.length) {
+        clear();
+        ctx.reportWarning(null);
+        return;
+      }
       const controller = new AbortController(); request = controller;
       const bbox = [bounds[1][0], bounds[1][1], bounds[0][0], bounds[0][1]].map(value => value.toFixed(5)).join(",");
+      const isCurrent = () => !disposed && !ctx.signal.aborted && current === generation && !hidden();
       try {
-        const response = await requestJson(`/api/visary/geometry/vehicle?${new URLSearchParams({ transport: types.join(","), bbox })}`, controller.signal);
-        if (disposed || ctx.signal.aborted || current !== generation || hidden()) return;
+        let response;
+        try {
+          response = await requestJson(`/api/visary/geometry/vehicle?${new URLSearchParams({ transport: types.join(","), bbox })}`, controller.signal);
+        } catch (error) {
+          if (!isCurrent() || controller.signal.aborted) return;
+          if (key(ctx.getView()) !== viewKey) return;
+          if (!(error instanceof RetryableFeedError)) throw error;
+          clear();
+          ctx.reportWarning(retryMessage);
+          return;
+        }
+        if (!isCurrent()) return;
         if (key(ctx.getView()) !== viewKey) { await refresh(); return; }
         render(normalizeVehicles(response.data, { bounds, types, route, routes, receivedAt: response.receivedAt, referenceTime: response.referenceTime }));
-      } catch (error) {
-        if (current !== generation || controller.signal.aborted || disposed || ctx.signal.aborted) return;
-        throw error;
+        ctx.reportWarning(null);
       } finally {
-        if (!disposed && !ctx.signal.aborted && current === generation && !hidden()) {
+        if (isCurrent()) {
           request = null; timer = setTimeout(() => { timer = null; refresh().catch(fail); }, POLL_MS);
         }
       }
@@ -204,7 +238,7 @@
   }
 
   function register(host) {
-    host.register({ id: "spb-live", apiVersion: 1, version: "1.1.0", title: "Транспорт сейчас", description: "Позиции автобусов, трамваев и троллейбусов Петербурга. Обновление каждые 16 секунд в видимой области от масштаба 12.", capabilities: ["geojson"], defaults: { bus: true, tram: true, trolley: true, route: "", routes: "" } }, activateVehicles);
+    host.register({ id: "spb-live", apiVersion: 1, version: "1.2.0", title: "Транспорт сейчас", description: "Позиции автобусов, трамваев и троллейбусов Петербурга. Обновление каждые 16 секунд в видимой области от масштаба 12.", capabilities: ["geojson"], defaults: { bus: true, tram: true, trolley: true, route: "", routes: "" } }, activateVehicles);
   }
   const controls = Object.freeze({
     "spb-live": Object.freeze([

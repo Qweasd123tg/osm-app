@@ -217,3 +217,26 @@ assert.equal(redrawMap.layers.get('module-redraw:points-point').minzoom,10);asse
 assert.throws(()=>redrawContext.setGeoJson('invalid',data,{pointMinZoom:10,pointLabelMinZoom:9}),/масштаб подписей/);
 await redrawHost.refresh('redraw');assert.equal(redrawStarts,2);assert(previousContext.signal.aborted);assert.equal(redrawMap.sources.size,1);
 await redrawHost.setSuspended(true);await redrawHost.refresh('redraw');assert.equal(redrawStarts,2,'Refresh respects suspension');redrawHost.dispose();
+
+// Recoverable source warnings are observable without destroying a healthy
+// session. They are transient, bounded and cannot be written by stale work.
+const warningMap=fakeMap(),warningStorage={getItem:()=>null,setItem(_key,value){this.value=value;}};
+let warningContext,warningChanges=0,lastWarningChange;
+const warningHost=new Host({map:warningMap,storage:warningStorage,onChange:(_snapshots,change)=>{warningChanges++;lastWarningChange=change;}});
+warningHost.register(manifest('warning'),ctx=>{
+  warningContext=ctx;ctx.setGeoJson('points',data);ctx.reportWarning('Повтор через 16 с.');
+});
+await warningHost.enable('warning');
+assert.equal(warningHost.get('warning').status,'ready');assert.equal(warningHost.get('warning').error,null);
+assert.equal(warningHost.get('warning').warning,'Повтор через 16 с.');assert.equal(warningMap.sources.size,1);
+assert.deepEqual(Object.keys(JSON.parse(warningStorage.value).modules.warning).sort(),['enabled','settings'],'Warnings are not persisted');
+const warned=warningChanges;warningContext.reportWarning('Повтор через 16 с.');assert.equal(warningChanges,warned);
+warningContext.reportWarning('x'.repeat(800));assert.equal(warningHost.get('warning').warning.length,400);
+assert.equal(lastWarningChange,'warning','Observers can update status without rebuilding focused controls');
+warningContext.reportWarning(null);assert.equal(warningHost.get('warning').warning,null);assert.equal(warningMap.sources.size,1);
+warningContext.reportWarning('offline');const obsoleteWarningContext=warningContext;
+await warningHost.setSuspended(true);assert.equal(warningHost.get('warning').warning,null);
+assert.throws(()=>obsoleteWarningContext.reportWarning('late'),{name:'AbortError'});
+await warningHost.setSuspended(false);assert.equal(warningHost.get('warning').warning,'Повтор через 16 с.');
+warningHost.disable('warning');assert.equal(warningHost.get('warning').warning,null);assert.equal(warningMap.sources.size,0);
+warningHost.dispose();

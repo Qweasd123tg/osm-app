@@ -46,8 +46,15 @@
       properties: { kind: "bus_stop", name, label: name, statusText: "Автобусная остановка" }, geometry: { type: "Point", coordinates: [lon, lat] } })) };
   }
   async function activate(ctx) {
-    let generation = 0, request = null, disposed = false;
-    const render = data => ctx.setGeoJson("stops", data, { color: "#547c9f", opacity: .9, pointMinZoom: 15, pointLabelMinZoom: 16, pointRadius: 4, pointLabel: "label", pointLabelStyle: "text" });
+    let generation = 0, request = null, disposed = false, renderedIds = null;
+    const render = data => {
+      // Coordinates and names are immutable in this bundled snapshot. The same
+      // ordered IDs need no worker upload, label rasterization or paint writes.
+      const ids = data.features.map(feature => feature.id).join("|");
+      if (ids === renderedIds) return;
+      ctx.setGeoJson("stops", data, { color: "#547c9f", opacity: .9, pointMinZoom: 15, pointLabelMinZoom: 16, pointRadius: 4, pointLabel: "label", pointLabelStyle: "text" });
+      renderedIds = ids;
+    };
     async function update(view = ctx.getView()) {
       const current = ++generation; request?.abort(); request = null;
       if (disposed || ctx.signal.aborted) return;
