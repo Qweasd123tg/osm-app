@@ -161,7 +161,11 @@
       }, geometry: { type: "Point", coordinates: entrance.coordinates } });
     }
     ctx.setGeoJson("lines", result.lines, { color: "#6f5499", colorProperty: "color", opacity: .9 });
-    ctx.setGeoJson("stations", result.stations, { color: "#6f5499", colorProperty: "color", opacity: 1, pointOpacity: "opacity", pointMinZoom: 10, pointLabelMinZoom: 12, pointRadius: 4, pointLabel: "label", pointLabelStyle: "text" });
+    ctx.setGeoJson("stations", result.stations, {
+      color: "#6f5499", colorProperty: "color", opacity: 1, pointOpacity: "opacity",
+      pointMinZoom: 10, pointLabelMinZoom: 12, pointRadius: 7, pointLabel: "label", pointLabelStyle: "text",
+      pointIcon: "metro", pointIconMinZoom: 12, pointIconSize: .65,
+    });
     ctx.setGeoJson("entrances", result.entrances, { color: "#6f5499", colorProperty: "color", opacity: .8, pointMinZoom: 15, pointRadius: 3 });
   }
   function register(host) {

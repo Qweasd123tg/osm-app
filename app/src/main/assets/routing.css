@@ -3,7 +3,7 @@
 .route-launch { flex: 0 0 auto; min-width: 80px; min-height: 44px; padding: 8px 12px; border: 0; border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); pointer-events: auto; font-size: 13px; font-weight: 550; }
 .routing-backdrop { position: fixed; inset: 0; z-index: 39; background: var(--scrim); }
 .routing-panel {
-  position: fixed; z-index: 40; left: 8px; right: 8px; bottom: max(8px, env(safe-area-inset-bottom));
+  position: fixed; z-index: 40; left: 8px; right: 8px; bottom: max(8px, var(--navigation-inset));
   display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto;
   height: min(58dvh, 620px); max-height: min(58dvh, 620px); max-width: 520px; margin: 0 auto;
   padding: 12px 14px; border-radius: 20px; background: var(--surface); color: var(--ink);
@@ -79,10 +79,10 @@
 .routing-steps span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .routing-attribution { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 6px; font-size: 10px; }
 .routing-attribution a { color: var(--muted); }
-.routing-chip { position: fixed; z-index: 15; left: 12px; bottom: calc(max(16px, env(safe-area-inset-bottom)) + 64px); display: flex; max-width: calc(100vw - 84px); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.routing-chip { position: fixed; z-index: 15; left: 12px; bottom: calc(max(16px, var(--navigation-inset)) + 64px); display: flex; max-width: calc(100vw - 84px); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
 .routing-chip button { min-height: 44px; padding: 8px 12px; border: 0; border-radius: inherit; background: transparent; color: var(--ink); }
 .routing-resume { font-size: 14px; font-weight: 550; }
-.routing-picker { position: fixed; z-index: 41; left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); max-width: 440px; margin: 0 auto; padding: 14px; border-radius: 20px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); animation: routing-enter 180ms ease; }
+.routing-picker { position: fixed; z-index: 41; left: 12px; right: 12px; bottom: max(12px, var(--navigation-inset)); max-width: 440px; margin: 0 auto; padding: 14px; border-radius: 20px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); animation: routing-enter 180ms ease; }
 .routing-picker > strong { display: block; margin: 0 0 10px; font-size: 15px; font-weight: 600; }
 .routing-picker-actions { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; }
 .routing-picker-actions button { min-height: 44px; padding: 10px 16px; border: 0; border-radius: 14px; background: var(--container); color: var(--ink); font-size: 14px; }

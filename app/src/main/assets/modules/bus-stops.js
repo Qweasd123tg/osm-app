@@ -52,7 +52,11 @@
       // ordered IDs need no worker upload, label rasterization or paint writes.
       const ids = data.features.map(feature => feature.id).join("|");
       if (ids === renderedIds) return;
-      ctx.setGeoJson("stops", data, { color: "#547c9f", opacity: .9, pointMinZoom: 15, pointLabelMinZoom: 16, pointRadius: 4, pointLabel: "label", pointLabelStyle: "text" });
+      ctx.setGeoJson("stops", data, {
+        color: "#64828c", opacity: .9, pointMinZoom: 15, pointLabelMinZoom: 16,
+        pointRadius: 4, pointLabel: "label", pointLabelStyle: "text",
+        pointIcon: "bus", pointIconBackground: "rounded", pointIconMinZoom: 16, pointIconSize: .5,
+      });
       renderedIds = ids;
     };
     async function update(view = ctx.getView()) {

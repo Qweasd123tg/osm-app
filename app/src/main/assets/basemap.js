@@ -28,6 +28,9 @@
     if (layer.type === "background") paint["background-color"] = colors.ground;
     if (id === "landuse_residential") paint["fill-color"] = colors.residential;
     if (id === "park" || id === "landuse_park" || id === "landcover_wood") paint["fill-color"] = colors.park;
+    // The bundled sprite has no wood texture; the calm forest fill is complete
+    // on its own and must not trigger missing-image requests on every map load.
+    if (id === "landcover_wood") delete paint["fill-pattern"];
     if (id === "water") paint["fill-color"] = colors.water;
     if (id === "waterway") paint["line-color"] = colors.water;
     if (id === "building") {

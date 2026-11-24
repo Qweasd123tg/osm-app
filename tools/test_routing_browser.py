@@ -12,10 +12,10 @@ from test_map_gestures_browser import camera, gesture
 
 
 ROAD = {"code": "Ok", "routes": [{"duration": 615, "distance": 1500,
-    "geometry": {"type": "LineString", "coordinates": [[30.32, 59.85], [30.325, 59.855], [30.33, 59.86]]}},
-    {"duration": 780, "distance": 1800, "geometry": {"type": "LineString", "coordinates": [[30.32, 59.85], [30.326, 59.858], [30.33, 59.86]]}}]}
+    "geometry": {"type": "LineString", "coordinates": [[30.32, 59.85], [30.335, 59.855], [30.33, 59.86]]}},
+    {"duration": 780, "distance": 1800, "geometry": {"type": "LineString", "coordinates": [[30.32, 59.85], [30.36, 59.879], [30.33, 59.86]]}}]}
 TRANSIT = {"success": True, "result": [{"sumTime": 1200, "sumDistance": 4200, "numTransfers": 0, "startTime": "2026-11-18T10:00:00", "endTime": "2026-11-18T10:20:00", "stages": [
-    {"type": "walk", "time": 120, "distance": 100, "path": [{"longitude": 30.32, "latitude": 59.85}, {"longitude": 30.321, "latitude": 59.851}]},
+    {"type": "walk", "time": 120, "distance": 100, "path": [{"longitude": 30.32, "latitude": 59.85}, {"longitude": 30.312, "latitude": 59.845}, {"longitude": 30.321, "latitude": 59.851}]},
     {"type": "bus", "routeNumber": "26", "time": 1080, "distance": 4100,
      "stops": [{"stopName": "Начальная", "stopLongitude": 30.321, "stopLatitude": 59.851}, {"stopName": "Конечная", "stopLongitude": 30.33, "stopLatitude": 59.86}],
      "path": [{"longitude": 30.321, "latitude": 59.851}, {"longitude": 30.33, "latitude": 59.86}]}]}]}
@@ -25,6 +25,28 @@ TRANSFER["sumTime"] = 1500
 # Deliberately wrong API metadata: actual second boarding must still be caught.
 TRANSFER["numTransfers"] = 0
 TRANSIT["result"].append(TRANSFER)
+
+
+def assert_route_in_view(page):
+    page.wait_for_function("!map.isMoving()")
+    view = page.evaluate("""() => {
+      const canvas=map.getCanvas().getBoundingClientRect();
+      const panel=document.querySelector('#routing-panel').getBoundingClientRect();
+      const controls=[...document.querySelectorAll('.bottom-nav,.connection.is-visible,.map-actions,.map-scale')]
+        .map(node=>node.getBoundingClientRect()).filter(box=>box.width&&box.height);
+      const outside=[];
+      for(const feature of map.getSource('route-plan-source')._data.features) {
+        if(feature.properties.kind==='stop') continue;
+        const points=feature.geometry.type==='LineString'?feature.geometry.coordinates:[feature.geometry.coordinates];
+        for(const location of points) {
+          const point=map.project(location), x=point.x+canvas.left, y=point.y+canvas.top;
+          if(x<canvas.left+2 || x>canvas.right-2 || y<canvas.top+2 || y>panel.top-2 ||
+            controls.some(box=>x>=box.left&&x<=box.right&&y>=box.top&&y<=box.bottom)) outside.push({location,x,y});
+        }
+      }
+      return {outside,panelTop:panel.top,canvasHeight:canvas.height};
+    }""")
+    assert not view["outside"], view
 
 
 def assert_cards_visible(page):
@@ -80,9 +102,10 @@ def main():
             page.evaluate("""() => {
               selectedPlace={name:'Конечная',longitude:30.33,latitude:59.86};
               window.routingTestUI=routingUI;
-              map.jumpTo({center:[30.325,59.855],zoom:15,pitch:37,bearing:20});
+              map.jumpTo({center:[30.325,59.855],zoom:15,pitch:37,bearing:20,padding:{top:12,right:8,bottom:40,left:4}});
             }""")
             pin = page.evaluate("selectedPlace")
+            original_padding = page.evaluate("map.getPadding()")
             page.locator("#route-open").click()
             page.locator("#routing-panel").evaluate("element=>Promise.all(element.getAnimations().map(animation=>animation.finished))")
             assert page.locator("#routing-to").input_value() == "Конечная"
@@ -90,6 +113,7 @@ def main():
             assert page.evaluate("routingTestUI.isOpen()")
             assert not page.locator("#map").evaluate("node=>node.inert"), "Routing is a nonmodal map workspace"
             assert page.locator(".routing-modes button svg[aria-hidden=true]").count() == 3
+            assert page.locator('[data-mode="transit"] svg path').get_attribute('d') == page.evaluate("SloiTransportSymbols.get('bus').paths[0].d")
             assert page.locator(".routing-parameters").is_hidden()
             rect = page.locator("#routing-panel").bounding_box()
             page.locator(".routing-submit").click()
@@ -97,28 +121,39 @@ def main():
             assert page.locator(".routing-option").count() == 2
             assert "11 мин" in page.locator(".routing-option").first.inner_text()
             assert "routed-foot" in requested[-1]
-            page.wait_for_function("!map.isMoving()")
+            assert_route_in_view(page)
             assert abs(page.evaluate("map.getPitch()") - 37) < .01
             assert abs(page.evaluate("map.getBearing()") - 20) < .01
+            assert page.evaluate("map.getPadding()") == original_padding
             assert page.evaluate("selectedPlace") == pin
             assert page.locator("#routing-panel").bounding_box() == rect, "Results must not move or resize the panel"
-            assert page.evaluate("map.getSource('route-plan-source')._data.features.some(f=>f.geometry.type==='LineString')")
-            walk_color = page.evaluate("map.getSource('route-plan-source')._data.features[0].properties.routeColor")
-            assert page.evaluate("map.getPaintProperty('route-plan-walk','line-dasharray')") == [1, 1.4]
+            page.wait_for_function("map.queryRenderedFeatures({layers:['route-plan-line']}).some(f=>f.properties.kind==='walk'&&f.properties.routeColor==='#23b34b')")
+            assert page.evaluate("map.queryRenderedFeatures({layers:['route-plan-walk']}).length") == 0
+            assert page.evaluate("map.getPaintProperty('route-plan-line','line-dasharray')") is None
             rail = page.locator(".routing-options")
             assert rail.evaluate("node=>node.scrollWidth>node.clientWidth")
             cards = page.locator(".routing-option")
             first, second = cards.nth(0).bounding_box(), cards.nth(1).bounding_box()
             assert first["y"] == second["y"]
             assert second["x"] < rail.bounding_box()["x"] + rail.bounding_box()["width"], "Next alternative should preview at the rail edge"
-            card_camera = page.evaluate("({center:map.getCenter().toArray(),zoom:map.getZoom(),pitch:map.getPitch(),bearing:map.getBearing()})")
+            card_camera = camera(page)
             request_count = len(requested)
             cards.nth(1).click()
             assert cards.nth(1).get_attribute("aria-pressed") == "true"
             assert cards.nth(0).get_attribute("aria-pressed") == "false"
-            assert page.evaluate("map.getSource('route-plan-source')._data.features[0].geometry.coordinates[1]") == [30.326, 59.858]
-            assert page.evaluate("({center:map.getCenter().toArray(),zoom:map.getZoom(),pitch:map.getPitch(),bearing:map.getBearing()})") == card_camera
-            assert len(requested) == request_count, "Switching a real alternative only replaces the selected geometry"
+            assert page.evaluate("map.getSource('route-plan-source')._data.features[0].geometry.coordinates[1]") == [30.36, 59.879]
+            assert_route_in_view(page)
+            assert camera(page)["zoom"] < card_camera["zoom"], "Fit the wider detour, including its middle point"
+            assert abs(page.evaluate("map.getPitch()") - 37) < .01
+            assert abs(page.evaluate("map.getBearing()") - 20) < .01
+            cdp = context.new_cdp_session(page)
+            before_pan = camera(page)
+            gesture(page, cdp, [(120, 170)], [(187, 201)])
+            manual_camera = camera(page)
+            assert manual_camera["center"] != before_pan["center"]
+            page.wait_for_timeout(500)
+            assert camera(page) == manual_camera, "A manual pan must never trigger another route fit"
+            assert len(requested) == request_count, "Switching an alternative uses its current geometry without an HTTP request"
             page.locator(".routing-close").click()
             assert page.locator("#routing-panel").is_hidden()
             assert page.locator(".routing-chip").is_visible()
@@ -127,11 +162,11 @@ def main():
             page.locator('[data-mode="bicycle"]').click(); page.locator(".routing-submit").click()
             page.wait_for_function("document.querySelector('.routing-submit').disabled===false")
             assert "routed-bike" in requested[-1]
-            bicycle_color = page.evaluate("map.getSource('route-plan-source')._data.features[0].properties.routeColor")
-            assert bicycle_color != walk_color
+            page.wait_for_function("map.queryRenderedFeatures({layers:['route-plan-line']}).some(f=>f.properties.kind==='bicycle'&&f.properties.routeColor==='#168a85')")
             assert page.evaluate("map.getPaintProperty('route-plan-line','line-color')") == ['get', 'routeColor']
             page.locator('[data-mode="transit"]').click(); page.locator(".routing-submit").click()
             page.locator(".routing-itinerary > summary").wait_for()
+            assert_route_in_view(page)
             assert not page.locator(".routing-itinerary").evaluate("node=>node.open")
             assert_cards_visible(page)
             page.locator(".routing-itinerary > summary").click()
@@ -140,10 +175,14 @@ def main():
             assert page.evaluate("map.getLayer('route-plan-stops').minzoom") == 15
             assert page.evaluate("map.getSource('route-plan-source')._data.features.find(f=>f.properties.kind==='stop').geometry.coordinates") == [30.321, 59.851]
             assert page.locator(".routing-option").count() == 2
-            colors = page.evaluate("map.getSource('route-plan-source')._data.features.filter(f=>f.geometry.type==='LineString').map(f=>f.properties.routeColor)")
-            assert colors[0] == walk_color and colors[1] not in [walk_color, bicycle_color]
+            page.wait_for_function("map.queryRenderedFeatures({layers:['route-plan-walk']}).some(f=>f.properties.walkConnector&&f.properties.routeColor==='#23b34b')")
+            assert page.evaluate("map.getPaintProperty('route-plan-walk','line-dasharray')") == [1, 1.4]
+            assert page.evaluate("""() => {
+              const segments = map.queryRenderedFeatures({layers:['route-plan-line','route-plan-casing']});
+              return segments.length > 0 && segments.every(f=>f.properties.transportType==='bus'&&f.properties.routeColor==='#1a73f0');
+            }""")
             badge_colors = page.locator('.routing-option').first.locator('.routing-leg-badge svg').evaluate_all("nodes=>nodes.map(n=>getComputedStyle(n).color)")
-            assert badge_colors[0] != badge_colors[1]
+            assert badge_colors == ['rgb(35, 179, 75)', 'rgb(26, 115, 240)']
             assert "Без пересадок" in page.locator(".routing-option").first.inner_text()
             assert "1 пересадка" in page.locator(".routing-option").nth(1).inner_text()
             assert "К 10:20" in page.locator(".routing-option").first.inner_text()
@@ -158,6 +197,12 @@ def main():
                 page.set_viewport_size({"width": width, "height": height})
                 try: assert_cards_visible(page)
                 except AssertionError as failure: geometry_failures.append(failure.args[0])
+                if (width, height) == (320, 568):
+                    page.emulate_media(reduced_motion="reduce")
+                    page.evaluate("map.jumpTo({pitch:55,bearing:43});document.querySelector('.routing-option').click()")
+                    assert not page.evaluate("map.isMoving()"), "Reduced motion should fit without animation"
+                    assert_route_in_view(page)
+                    page.emulate_media(reduced_motion="no-preference")
             page.set_viewport_size({"width": 390, "height": 844})
             assert_cards_visible(page)
             assert not geometry_failures, geometry_failures
@@ -167,6 +212,7 @@ def main():
             page.locator(".routing-parameters > summary").click()
             assert page.locator('.routing-transport-options input:checked').count() == 4
             assert page.locator('.routing-transport-type svg').count() == 4
+            assert page.locator('.routing-transport-type:has(#routing-transport-subway) svg path').get_attribute('d') == page.evaluate("SloiTransportSymbols.get('metro').paths[0].d")
             page.locator("#routing-direct-only").check()
             page.locator(".routing-submit").click()
             page.locator(".routing-option").wait_for()
@@ -231,6 +277,22 @@ def main():
             pending.clear(); block["value"] = False
             page.locator(".routing-option").first.wait_for()
             assert camera(page) == manually_moved
+
+            block["value"] = True
+            page.locator(".routing-submit").click()
+            page.wait_for_function("document.querySelector('.routing-status').textContent==='Строю маршрут…'")
+            assert pending
+            camera_before_close = camera(page)
+            page.locator(".routing-close").click()
+            for route in pending:
+                try: route.fulfill(json=TRANSIT)
+                except Exception: pass
+            pending.clear(); block["value"] = False
+            page.wait_for_timeout(500)
+            assert not page.evaluate("routingTestUI.isOpen()")
+            assert page.locator(".routing-option").count() == 0
+            assert camera(page) == camera_before_close, "A late response cannot move a closed route panel's map"
+            page.locator("#route-open").click()
 
             # Editing an endpoint invalidates its coordinates until a live suggestion is selected.
             page.locator("#routing-to").fill("Новая")
@@ -363,7 +425,7 @@ def main():
             browser.close()
     finally:
         server.shutdown(); server.server_close()
-    print("Routing browser OK: vehicle selections/server subset, distinct segment/badge colors, real horizontal alternatives, SVG modes/legs, direct-only validation, nonmodal map, stale preference cancellation, stable card camera/pin, draft endpoints, guarded names without snapping, native-back and cleanup")
+    print("Routing browser OK: vehicle filters, route colors and cards, whole-path camera fit above panel, reduced motion, manual pan and closed request guards, draft endpoints and cleanup")
 
 
 if __name__ == "__main__": main()

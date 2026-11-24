@@ -70,6 +70,10 @@ assert.equal(style.layers.find((layer) => layer.id.startsWith('base-light:')).la
 for (const suffix of ['.json', '@2x.json']) {
   const sprite = JSON.parse(fs.readFileSync(path.join(root, `app/src/main/assets/vendor/ofm-sprite${suffix}`), 'utf8'));
   assert.ok(Object.keys(sprite).length > 50);
+  for (const layer of api.createStyle().layers) {
+    const pattern=layer.paint?.['fill-pattern'];
+    if (typeof pattern==='string') assert.ok(sprite[pattern],`Missing bundled fill pattern: ${pattern}`);
+  }
 }
 for (const suffix of ['.png', '@2x.png']) {
   const png = fs.readFileSync(path.join(root, `app/src/main/assets/vendor/ofm-sprite${suffix}`));

@@ -5,11 +5,13 @@
   // a layout property, never a new texture or DOM element for every position.
   const SIZE = 40, PIXEL_RATIO = 2;
   const types = Object.freeze(["bus", "tram", "trolley"]);
-  function foreground(color) {
+  const outlines = new Map();
+  function contrastInk(color, dark, darkBase) {
     const rgb = color.slice(1).match(/../g).map(value => parseInt(value, 16) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
     const lightness = .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2];
-    return (lightness + .05) / .072 > 1.05 / (lightness + .05) ? "#1f2937" : "#ffffff";
+    return (lightness + .05) / darkBase > 1.05 / (lightness + .05) ? dark : "#ffffff";
   }
+  const foreground = color => contrastInk(color, "#1f2937", .072);
   function canvas() {
     const element = root.document?.createElement("canvas");
     const context = element?.getContext("2d");
@@ -26,17 +28,20 @@
     context.fillStyle = color; context.strokeStyle = foreground(color);
     context.lineWidth = 1.4; context.lineJoin = "round";
     context.beginPath();
-    if (directional) {
-      // Tip points north; the GPS anchor is the circle/pictogram center, not
-      // the tip. Tangents make the transition from the tip to the circle smooth.
-      const radius = 15, distance = 19, angle = Math.acos(radius / distance);
-      const tangent = -Math.PI / 2 + angle;
-      context.moveTo(20, 1);
-      context.lineTo(20 + radius * Math.cos(tangent), 20 + radius * Math.sin(tangent));
-      context.arc(20, 20, radius, tangent, -Math.PI / 2 - angle + 2 * Math.PI);
-      context.closePath();
-    } else context.arc(20, 20, 15, 0, Math.PI * 2);
+    context.arc(20, 20, 13.5, 0, Math.PI * 2);
     context.fill(); context.stroke();
+
+    if (directional) {
+      // The separate arrow starts at north. The circle's center stays on the
+      // GPS fix as the sprite rotates along the vehicle's heading.
+      context.lineWidth = .9;
+      context.beginPath();
+      context.moveTo(20, .9);
+      context.lineTo(23.9, 4.6);
+      context.lineTo(16.1, 4.6);
+      context.closePath();
+      context.fill(); context.stroke();
+    }
     return image(context);
   }
   function roundedBox(context, x, y, width, height, radius) {
@@ -47,29 +52,40 @@
     context.lineTo(x + radius, y + height); context.quadraticCurveTo(x, y + height, x, y + height - radius);
     context.lineTo(x, y + radius); context.quadraticCurveTo(x, y, x + radius, y);
   }
-  function icon(type, color = "#ffffff") {
-    if (!types.includes(type)) throw new Error("Неизвестный вид транспорта");
+  function icon(type, color = "#ffffff", background = "none") {
+    if (background !== "none" && (background !== "rounded" || type === "metro")) throw new Error("Некорректный фон пиктограммы");
+    if (type !== "metro" && !types.includes(type)) throw new Error("Неизвестный вид транспорта");
     if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) throw new Error("Некорректный цвет пиктограммы");
+    const symbol = root.SloiTransportSymbols?.get(type);
+    if (!symbol || typeof root.Path2D !== "function") return null;
+    if (!outlines.has(type)) {
+      outlines.set(type, symbol.paths.map(({ d, fillRule }) => ({ outline: new root.Path2D(d), fillRule })));
+    }
     const context = canvas();
-    context.strokeStyle = color; context.fillStyle = color;
-    context.lineWidth = 1.55; context.lineJoin = "round"; context.lineCap = "round";
-    context.beginPath();
-    const top = type === "bus" ? 14.5 : 16.3;
-    roundedBox(context, 14.8, top, 10.4, 25 - top, 1.8);
-    context.moveTo(15.3, 20.7); context.lineTo(24.7, 20.7);
-    context.moveTo(17.2, 25); context.lineTo(17.2, 26.2);
-    context.moveTo(22.8, 25); context.lineTo(22.8, 26.2);
-    if (type === "tram") {
-      context.moveTo(17.4, 14.4); context.lineTo(20, 12.1); context.lineTo(22.6, 14.4);
-      context.lineTo(20, 16.3); context.closePath();
-    } else if (type === "trolley") {
-      context.moveTo(17.3, 16.3); context.lineTo(19.6, 12);
-      context.moveTo(22.1, 16.3); context.lineTo(24.4, 12);
+    if (background === "rounded") {
+      context.fillStyle = color;
+      context.beginPath();
+      roundedBox(context, 9, 8, 22, 24, 3);
+      context.closePath();
+      context.fill();
+      // The near-black ink provides more contrast on the muted stop plate.
+      color = contrastInk(color, "#111820", .05877);
     }
-    context.stroke();
-    for (const x of [17.4, 22.6]) {
-      context.beginPath(); context.arc(x, 23, .7, 0, Math.PI * 2); context.fill();
+    const [x, y, width, height] = symbol.viewBox;
+    const size = type === "metro" ? 20 : 16;
+    if (type === "metro") {
+      // White beneath the original black SVG makes the cutout readable.
+      context.fillStyle = "#ffffff";
+      context.beginPath();
+      context.arc(SIZE / 2, SIZE / 2, size / 2 - .5, 0, Math.PI * 2);
+      context.fill();
+      color = "#000000";
     }
+    const scale = size / Math.max(width, height);
+    context.translate((SIZE - width * scale) / 2 - x * scale, (SIZE - height * scale) / 2 - y * scale);
+    context.scale(scale, scale);
+    context.fillStyle = color;
+    for (const { outline, fillRule } of outlines.get(type)) context.fill(outline, fillRule);
     return image(context);
   }
   root.SloiVehicleMarkers = Object.freeze({ body, icon, foreground, types, size: SIZE, pixelRatio: PIXEL_RATIO });

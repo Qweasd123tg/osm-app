@@ -1,7 +1,7 @@
 .transport-launch { display: grid; place-items: center; width: 48px; min-width: 48px; padding: 10px; }
 .transport-launch svg { width: 24px; height: 24px; }
 .transport-panel {
-  position: fixed; z-index: 40; right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); left: 8px;
+  position: fixed; z-index: 40; right: 8px; bottom: max(8px, var(--navigation-inset)); left: 8px;
   display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 8px;
   width: auto; max-width: 520px; height: min(50dvh, 480px); margin: 0 auto; padding: 8px 14px 12px;
   overflow: hidden; border-radius: 22px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow);

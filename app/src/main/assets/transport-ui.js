@@ -2,11 +2,6 @@
   "use strict";
   const TYPES = Object.freeze({ bus: "Автобус", tram: "Трамвай", trolley: "Троллейбус" });
   const COLORS = ["#3974d5", "#bb4853", "#168a85", "#8253b0", "#b76c18"];
-  const paths = {
-    bus: '<rect x="5" y="3" width="14" height="17" rx="3"/><path d="M5 11h14M8 3v8m8-8v8M8 20v2m8-2v2M8 16h1m6 0h1"/>',
-    tram: '<rect x="5" y="6" width="14" height="14" rx="3"/><path d="m9 6 3-4 3 4M5 13h14M9 20l-2 2m8-2 2 2M8 17h1m6 0h1"/>',
-    trolley: '<rect x="5" y="7" width="14" height="13" rx="3"/><path d="m9 7 3-6m3 6 3-6M5 13h14M8 20v2m8-2v2M8 17h1m6 0h1"/>',
-  };
   function node(tag, className, text) {
     const element = document.createElement(tag);
     if (className) element.className = className;
@@ -19,9 +14,7 @@
     return element;
   }
   function icon(type) {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    for (const [key, value] of Object.entries({ viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", focusable: "false" })) svg.setAttribute(key, value);
-    svg.innerHTML = paths[type] || paths.bus; return svg;
+    return root.SloiTransportSymbols.create(type) || root.SloiTransportSymbols.create("bus");
   }
   function routeChip(route) {
     const chip = node("span", "transport-route-chip");

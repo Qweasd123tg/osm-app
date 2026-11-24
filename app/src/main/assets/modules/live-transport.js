@@ -5,9 +5,9 @@
   const POLL_MS = 16000, MAX_BYTES = 2 * 1024 * 1024, MAX_ROWS = 5000;
   const MIN_ZOOM = 12, MAX_AGE_MS = 5 * 60 * 1000, MAX_PRESET_ROUTES = 20, MAX_ROUTES_SETTING = 8192;
   const TYPES = Object.freeze({
-    bus: { name: "Автобус", prefix: "А", color: "#b76c18" },
-    tram: { name: "Трамвай", prefix: "Т", color: "#bb4853" },
-    trolley: { name: "Троллейбус", prefix: "Тб", color: "#168a85" },
+    bus: { name: "Автобус", prefix: "А", color: "#1a73f0" },
+    tram: { name: "Трамвай", prefix: "Т", color: "#eb5a2b" },
+    trolley: { name: "Троллейбус", prefix: "Тб", color: "#e9a300" },
   });
   const EMPTY = () => ({ type: "FeatureCollection", features: [] });
   const cancelled = () => Object.assign(new Error("Загрузка отменена"), { name: "AbortError" });

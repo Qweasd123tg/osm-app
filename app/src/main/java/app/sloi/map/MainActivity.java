@@ -19,7 +19,9 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
+import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.webkit.ConsoleMessage;
@@ -57,6 +59,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_GEOJSON_BYTES = 2 * 1024 * 1024;
 
     private WebView webView;
+    private int navigationInsetPx;
     private ExtensionStateStore extensionStateStore;
     private OnDeviceSceneEngine sceneEngine;
     private CityPackStore cityPackStore;
@@ -119,27 +122,49 @@ public final class MainActivity extends Activity {
             }
         });
 
-        getWindow().setStatusBarColor(Color.rgb(246, 245, 240));
-        getWindow().setNavigationBarColor(Color.rgb(246, 245, 240));
+        Window window = getWindow();
+        window.setStatusBarColor(Color.rgb(246, 245, 240));
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.setNavigationBarDividerColor(Color.TRANSPARENT);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.setNavigationBarContrastEnforced(false);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false);
+        } else {
+            View decor = window.getDecorView();
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        }
 
         webView = new WebView(this);
         webView.setBackgroundColor(Color.rgb(235, 238, 235));
-        // Android 15+ enforces edge-to-edge. Give WebView an actual usable
-        // viewport above the system bars and IME instead of covering its forms.
+        // Draw the map under navigation, and reserve the navigation inset for
+        // web controls. A docked keyboard still resizes the whole web viewport.
         FrameLayout content = new FrameLayout(this);
         content.addView(webView, new FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(content);
-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         content.setOnApplyWindowInsetsListener((view, insets) -> {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 android.graphics.Insets safe = insets.getInsets(
-                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
-                view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                int keyboardBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
+                view.setPadding(safe.left, safe.top, safe.right, keyboardBottom);
+                updateNavigationInset(keyboardBottom > 0 ? 0 : safe.bottom);
                 return WindowInsets.CONSUMED;
             }
+            // On older Android, the resize inset includes the keyboard when
+            // it exceeds the stable navigation bar height.
+            int bottom = insets.getSystemWindowInsetBottom();
+            boolean keyboardVisible = bottom > insets.getStableInsetBottom();
             view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
-                insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+                insets.getSystemWindowInsetRight(), keyboardVisible ? bottom : 0);
+            updateNavigationInset(keyboardVisible ? 0 : bottom);
             return insets.consumeSystemWindowInsets();
         });
         content.requestApplyInsets();
@@ -290,6 +315,11 @@ public final class MainActivity extends Activity {
         });
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public void onPageFinished(WebView view, String url) {
+                if (APP_URL.equals(url)) publishNavigationInset();
+            }
+
+            @Override
             public WebResourceResponse shouldInterceptRequest(
                 WebView view,
                 WebResourceRequest request
@@ -344,6 +374,24 @@ public final class MainActivity extends Activity {
             webView.restoreState(savedInstanceState);
         }
         onCityDataChangedForSearch();
+    }
+
+    private void updateNavigationInset(int pixels) {
+        if (navigationInsetPx != pixels) {
+            navigationInsetPx = pixels;
+            publishNavigationInset();
+        }
+    }
+
+    private void publishNavigationInset() {
+        if (destroyed || webView == null || !APP_URL.equals(webView.getUrl())) return;
+        // Convert Android pixels using the renderer's current CSS pixel ratio.
+        webView.evaluateJavascript(
+            "if(document.documentElement)document.documentElement.style.setProperty(" +
+                "'--native-navigation-inset'," + navigationInsetPx +
+                "/(window.devicePixelRatio||1)+'px')",
+            null
+        );
     }
 
     @Override
@@ -957,11 +1005,19 @@ public final class MainActivity extends Activity {
                 if (destroyed) return;
                 int color = dark ? Color.rgb(36, 39, 45) : Color.WHITE;
                 getWindow().setStatusBarColor(color);
-                getWindow().setNavigationBarColor(color);
-                View decor = getWindow().getDecorView();
-                int lightFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-                decor.setSystemUiVisibility(dark ? decor.getSystemUiVisibility() & ~lightFlags
-                    : decor.getSystemUiVisibility() | lightFlags);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    WindowInsetsController controller = getWindow().getInsetsController();
+                    if (controller != null) {
+                        int lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                        controller.setSystemBarsAppearance(dark ? 0 : lightBars, lightBars);
+                    }
+                } else {
+                    View decor = getWindow().getDecorView();
+                    int lightFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                    decor.setSystemUiVisibility(dark ? decor.getSystemUiVisibility() & ~lightFlags
+                        : decor.getSystemUiVisibility() | lightFlags);
+                }
                 webView.setBackgroundColor(color);
                 if (webView.getParent() instanceof View) ((View) webView.getParent()).setBackgroundColor(color);
             });

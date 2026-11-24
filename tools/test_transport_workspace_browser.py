@@ -19,7 +19,7 @@ FIXTURE = """<!doctype html><html lang="ru"><meta charset="utf-8">
 <button id="map-action" style="position:fixed;top:20px;left:20px" onclick="mapClicks++">Карта</button>
 <button id="launch" style="position:fixed;top:70px;left:20px">Транспорт</button>
 <main id="settings-page" class="settings-page" hidden><div id="editor" class="settings-panel"></div></main>
-<script src="/modules/live-transport.js"></script><script src="/transport-presets.js"></script><script src="/transport-ui.js"></script>
+<script src="/transport-symbols.js"></script><script src="/modules/live-transport.js"></script><script src="/transport-presets.js"></script><script src="/transport-ui.js"></script>
 <script>
 window.mapClicks=0;window.cameraCalls=[];window.events=new Map();
 window.map={getZoom:()=>15,on:(type,fn)=>events.set(type,fn),off:(type,fn)=>events.get(type)===fn&&events.delete(type),
@@ -101,6 +101,7 @@ def check_view(browser, origin, width, height):
     chosen = page.locator('[data-transport-preset]')
     assert chosen.get_attribute('aria-pressed') == 'true'
     assert chosen.locator('.transport-route-chip').count() == 5
+    assert chosen.locator('.transport-route-chip svg').evaluate_all("nodes=>nodes.every((svg,i)=>svg.querySelector('path').getAttribute('d')===SloiTransportSymbols.get(['bus','tram','trolley','bus','bus'][i]).paths[0].d)"), 'Preset chips must use the shared original APK contours'
     assert chosen.locator('.transport-route-chip strong').all_text_contents() == ['49', '49', '17', '10', '50']
     page.locator('[data-transport-hide]').click()
     assert not page.evaluate("snapshots['spb-live'].enabled")

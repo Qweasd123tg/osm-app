@@ -39,7 +39,7 @@
         <span class="search-copy"><strong>Поиск</strong><span id="region-name"></span></span>
       </button>
       <button id="route-open" class="route-launch" type="button" aria-haspopup="dialog">Маршрут</button>
-      <button id="transport-open" class="route-launch transport-launch" type="button" aria-label="Транспорт и метро" aria-controls="transport-panel" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="3" width="14" height="16" rx="4" stroke="currentColor" stroke-width="1.8"/><path d="M5 11h14M8 19v2m8-2v2M9 15h.01M15 15h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+      <button id="transport-open" class="route-launch transport-launch" type="button" aria-label="Транспорт и метро" aria-controls="transport-panel" aria-expanded="false"></button>
     </header>
     <div class="map-toolbar" hidden></div>
 
@@ -218,7 +218,7 @@
       </div>
       <div class="sheet-foot">
         <span id="data-status">OpenStreetMap</span>
-        <span>0.6.9</span>
+        <span>0.6.11</span>
       </div>
     </section>
 
@@ -294,6 +294,7 @@
     <script src="layer-runtime.js"></script>
     <script src="layer-library.js"></script>
     <script src="extension-storage.js"></script>
+    <script src="transport-symbols.js"></script>
     <script src="vehicle-markers.js"></script>
     <script src="module-host.js"></script>
     <script src="modules/bundled.js"></script>
@@ -304,6 +305,7 @@
     <script src="transport-ui.js"></script>
     <script src="modules/native-shadows.js"></script>
     <script src="basemap.js"></script>
+    <script src="basemap-recovery.js"></script>
     <script src="offline-basemap.js"></script>
     <script src="search-controller.js"></script>
     <script src="place-names.js"></script>

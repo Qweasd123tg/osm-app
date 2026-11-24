@@ -5,6 +5,7 @@
   const limits = Object.freeze({ maxSettingsBytes: 16384, maxSources: 4, maxGeoJsonBytes: 2 * 1024 * 1024, maxPointLabels: 128, maxVehicleImages: 64, moveDebounceMs: 120 });
   const idPattern = /^[a-z][a-z0-9-]{0,47}$/;
   const forbidden = new Set(["__proto__", "constructor", "prototype"]);
+  const pointIconTypes = new Set(["bus", "tram", "trolley", "metro"]);
 
   function json(value, label, maxBytes) {
     const serialized = JSON.stringify(value, (key, item) => {
@@ -294,6 +295,11 @@
         }
         return id;
       };
+      const iconKey = (type, tint, background = "none") => {
+        if (type === "metro") return "icon|metro";
+        return background === "none" ? `icon|${type}|${tint}` : `icon|${type}|${background}|${tint}`;
+      };
+      const iconImage = (type, tint, background = "none") => vehicleImage(iconKey(type, tint, background), () => root.SloiVehicleMarkers.icon(type, tint, background));
       const context = Object.freeze({
         signal: session.controller.signal,
         settings: entry.settings,
@@ -349,6 +355,10 @@
           const colorProperty = options.colorProperty === undefined ? null : options.colorProperty;
           const pointLabelStyle = options.pointLabelStyle === undefined ? "badge" : options.pointLabelStyle;
           const pointMarker = options.pointMarker === undefined ? "circle" : options.pointMarker;
+          const pointIcon = options.pointIcon === undefined ? null : options.pointIcon;
+          const pointIconBackground = options.pointIconBackground === undefined ? "none" : options.pointIconBackground;
+          const pointIconMinZoom = options.pointIconMinZoom === undefined ? pointMinZoom : options.pointIconMinZoom;
+          const pointIconSize = options.pointIconSize === undefined ? .65 : options.pointIconSize;
           const pointHeading = options.pointHeading === undefined ? "heading" : options.pointHeading;
           const pointType = options.pointType === undefined ? "vehicleType" : options.pointType;
           if (!["circle", "vehicle"].includes(pointMarker)) throw new Error("Некорректный вид маркера точек");
@@ -356,6 +366,12 @@
           if (!Number.isFinite(pointMinZoom) || pointMinZoom < 0 || pointMinZoom > 24) throw new Error("Некорректный масштаб точек слоя");
           if (!Number.isFinite(pointLabelMinZoom) || pointLabelMinZoom < pointMinZoom || pointLabelMinZoom > 24) throw new Error("Некорректный масштаб подписей слоя");
           if (!Number.isFinite(pointRadius) || pointRadius < 2 || pointRadius > 16) throw new Error("Некорректный размер точек слоя");
+          if (pointIconBackground !== "none" && (pointIconBackground !== "rounded" || pointIcon === null || pointIcon === "metro")) throw new Error("Некорректный фон пиктограммы точек");
+          if (pointIcon !== null) {
+            if (pointMarker !== "circle" || !pointIconTypes.has(pointIcon)) throw new Error("Некорректная пиктограмма точек слоя");
+            if (!Number.isFinite(pointIconMinZoom) || pointIconMinZoom < pointMinZoom || pointIconMinZoom > 24) throw new Error("Некорректный масштаб пиктограмм точек");
+            if (!Number.isFinite(pointIconSize) || pointIconSize < .3 || pointIconSize > 1) throw new Error("Некорректный размер пиктограмм точек");
+          }
           for (const property of [pointLabel, pointOpacity, colorProperty, ...(pointMarker === "vehicle" ? [pointHeading, pointType] : [])]) if (property !== null && (typeof property !== "string" || !/^[a-zA-Z_][a-zA-Z0-9_]{0,31}$/.test(property))) throw new Error("Некорректное поле оформления точек");
           if (pointMarker === "vehicle" && (pointHeading === null || pointType === null)) throw new Error("Требуются поля вида и направления транспорта");
           if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color) || typeof opacity !== "number" || !Number.isFinite(opacity) || opacity < 0 || opacity > 1) throw new Error("Некорректное оформление GeoJSON");
@@ -366,29 +382,32 @@
             for (const feature of safe.features) if (feature?.type === "Feature") feature.properties = { ...feature.properties, __moduleColor: featureColor(feature) };
           }
           const paintColor = colorProperty === null ? color : ["coalesce", ["get", "__moduleColor"], color];
-          const vehicleMarkers = pointMarker === "vehicle" && root.SloiVehicleMarkers
-            && typeof root.document?.createElement === "function" && typeof this.map.addImage === "function"
+          const markerSprites = root.SloiVehicleMarkers;
+          const supportsImages = typeof root.document?.createElement === "function" && typeof this.map.addImage === "function"
             && typeof this.map.hasImage === "function" && typeof this.map.removeImage === "function";
+          const supportsMarkerSprites = Boolean(markerSprites) && Boolean(root.SloiTransportSymbols)
+            && supportsImages && typeof root.Path2D === "function";
+          const vehicleMarkers = pointMarker === "vehicle" && supportsMarkerSprites;
+          const pointIcons = pointIcon !== null && supportsMarkerSprites;
           if (vehicleMarkers && safe?.type === "FeatureCollection" && Array.isArray(safe.features)) {
             const points = safe.features.filter(feature => feature?.geometry?.type === "Point");
             const heading = feature => typeof feature.properties?.[pointHeading] === "number" && Number.isFinite(feature.properties[pointHeading])
               && feature.properties[pointHeading] >= 0 && feature.properties[pointHeading] < 360 ? feature.properties[pointHeading] : null;
             const bodyKey = (color, directed) => `body|${color}|${directed ? "directional" : "neutral"}`;
             const neutralColor = "#59616d";
-            const iconKey = (type, tint) => `icon|${type}|${root.SloiVehicleMarkers.foreground(tint)}`;
-            const commonKeys = [bodyKey(neutralColor, true), bodyKey(neutralColor, false), ...root.SloiVehicleMarkers.types.flatMap(type => [`icon|${type}|#ffffff`, `icon|${type}|#1f2937`])];
+            const commonKeys = [bodyKey(neutralColor, true), bodyKey(neutralColor, false), ...markerSprites.types.flatMap(type => [iconKey(type, "#ffffff"), iconKey(type, "#1f2937")])];
             const fallbackKeys = [bodyKey(color, true), bodyKey(color, false)];
             const wanted = new Set(points.length ? [...commonKeys, ...fallbackKeys] : []);
             for (const feature of points) {
               wanted.add(bodyKey(featureColor(feature), heading(feature) !== null));
               const type = feature.properties?.[pointType];
-              if (root.SloiVehicleMarkers.types.includes(type)) wanted.add(iconKey(type, featureColor(feature)));
+              if (markerSprites.types.includes(type)) wanted.add(iconKey(type, markerSprites.foreground(featureColor(feature))));
             }
             session.vehicleKeys.set(localId, wanted); pruneVehicleImages();
             // Reserve each source's default bodies before optional custom colors.
             // An exhausted texture budget must not hide a vehicle entirely.
             const common = points.length ? Object.fromEntries([true, false].map(directed => [String(directed), vehicleImage(bodyKey(neutralColor, directed), () => root.SloiVehicleMarkers.body(neutralColor, directed))])) : {};
-            if (points.length) for (const type of root.SloiVehicleMarkers.types) for (const foreground of ["#ffffff", "#1f2937"]) vehicleImage(`icon|${type}|${foreground}`, () => root.SloiVehicleMarkers.icon(type, foreground));
+            if (points.length) for (const type of markerSprites.types) for (const foreground of ["#ffffff", "#1f2937"]) iconImage(type, foreground);
             const defaults = points.length ? Object.fromEntries([true, false].map(directed => [String(directed), vehicleImage(bodyKey(color, directed), () => root.SloiVehicleMarkers.body(color, directed)) || common[String(directed)]])) : {};
             for (const feature of points) {
               const course = heading(feature), directed = course !== null, type = feature.properties?.[pointType], tint = featureColor(feature);
@@ -396,15 +415,14 @@
               const fallback = defaults[String(directed)];
               const body = customBody || fallback || "";
               const actualTint = customBody ? tint : fallback === common[String(directed)] ? neutralColor : color;
-              const foreground = root.SloiVehicleMarkers.foreground(actualTint);
-              const icon = root.SloiVehicleMarkers.types.includes(type) ? vehicleImage(iconKey(type, actualTint), () => root.SloiVehicleMarkers.icon(type, foreground)) : "";
+              const foreground = markerSprites.foreground(actualTint);
+              const icon = markerSprites.types.includes(type) ? iconImage(type, foreground) : "";
               feature.properties = { ...feature.properties, __moduleVehicleBodyImage: body, __moduleVehicleIconImage: icon, __moduleVehicleHeading: course ?? 0 };
             }
           }
           // Locally rasterized badges avoid a dependency on the basemap's font
           // server: a failed glyph request must not hide the entire live source.
-          const rasterLabels = pointLabel !== null && typeof root.document?.createElement === "function"
-            && typeof this.map.addImage === "function" && typeof this.map.hasImage === "function" && typeof this.map.removeImage === "function";
+          const rasterLabels = pointLabel !== null && supportsImages;
           if (rasterLabels && safe?.type === "FeatureCollection" && Array.isArray(safe.features)) {
             session.labelKeys.set(localId, new Set(safe.features.filter(feature => feature?.geometry?.type === "Point")
               .filter(feature => labelText(feature.properties?.[pointLabel])).map(feature => labelKey(labelText(feature.properties?.[pointLabel]), featureColor(feature), pointLabelStyle))));
@@ -419,15 +437,31 @@
           const checked = safe && safe.type === "FeatureCollection" && Array.isArray(safe.features) && safe.features.length === 0
             ? { data: safe, bounds: null, featureCount: 0 }
             : runtime.validateGeoJson(safe);
+          if (pointIcons) {
+            const points = checked.data.features.filter(feature => ["Point", "MultiPoint"].includes(feature.geometry.type));
+            const colors = points.map(featureColor);
+            const tints = colors.map(color => pointIconBackground === "rounded" ? color.toLowerCase() : markerSprites.foreground(color));
+            session.vehicleKeys.set(localId, new Set(tints.map(tint => iconKey(pointIcon, tint, pointIconBackground))));
+            pruneVehicleImages();
+            for (const [index, feature] of points.entries()) {
+              if (colorProperty !== null) feature.properties.__moduleColor = colors[index];
+              feature.properties.__modulePointIconImage = iconImage(pointIcon, tints[index], pointIconBackground);
+            }
+            checked.data = json(checked.data, "GeoJSON", limits.maxGeoJsonBytes);
+          }
           const pointAlpha = pointOpacity === null ? opacity : ["*", opacity, ["min", 1, ["max", 0, ["to-number", ["get", pointOpacity], 1]]]];
           const id = `module-${entry.manifest.id}:${localId}`;
           let record = session.sources.get(localId);
           if (!record) {
             if (session.sources.size >= limits.maxSources) throw new Error("Достигнут лимит источников модуля");
             const source = `${id}-source`;
-            record = { source, layers: [`${id}-fill`, `${id}-line`, `${id}-point`], pointLabel, pointMarker, vehicleMarkers: Boolean(vehicleMarkers), vehicleIconLayer: vehicleMarkers ? `${id}-vehicle-icon` : null, ownedSource: null, ownedLayers: [] };
+            const iconLayer = vehicleMarkers ? `${id}-vehicle-icon` : pointIcons ? `${id}-point-icon` : null;
+            record = {
+              source, layers: [`${id}-fill`, `${id}-line`, `${id}-point`], pointLabel, pointMarker, vehicleMarkers,
+              pointIcon, pointIcons, pointIconBackground, pointIconMinZoom, pointIconSize, iconLayer, ownedSource: null, ownedLayers: [],
+            };
             if (pointLabel !== null) record.layers.push(`${id}-label`);
-            if (vehicleMarkers) record.layers.push(record.vehicleIconLayer);
+            if (iconLayer) record.layers.push(iconLayer);
             session.sources.set(localId, record);
             session.cleanups.push(() => {
               for (const owned of [...record.ownedLayers].reverse()) { try { if (this.map.getLayer(owned.id) === owned.layer) this.map.removeLayer(owned.id); } catch (_) {} }
@@ -443,20 +477,27 @@
                 vehicleMarkers ? { id: record.layers[2], type: "symbol", source, minzoom: pointMinZoom,
                   filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "__moduleVehicleBodyImage"], ""]],
                   layout: { "icon-image": ["get", "__moduleVehicleBodyImage"], "icon-size": .95, "icon-anchor": "center", "icon-rotate": ["get", "__moduleVehicleHeading"],
-                    "icon-rotation-alignment": "map", "icon-pitch-alignment": "map", "icon-keep-upright": false, "icon-allow-overlap": true, "icon-ignore-placement": true },
+                    "icon-rotation-alignment": "map", "icon-pitch-alignment": "viewport", "icon-keep-upright": false, "icon-allow-overlap": true, "icon-ignore-placement": true },
                   paint: { "icon-opacity": pointAlpha } }
-                  : { id: record.layers[2], type: "circle", source, minzoom: pointMinZoom, filter: ["==", ["geometry-type"], "Point"], paint: { "circle-color": paintColor, "circle-opacity": pointAlpha, "circle-radius": pointRadius, "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5, "circle-stroke-opacity": pointAlpha } },
+                  : { id: record.layers[2], type: "circle", source, minzoom: pointMinZoom, filter: ["==", ["geometry-type"], "Point"],
+                    paint: { "circle-color": paintColor, "circle-opacity": pointAlpha, "circle-radius": pointRadius, "circle-stroke-color": "#ffffff",
+                      "circle-stroke-width": 1.5, "circle-stroke-opacity": pointAlpha, "circle-pitch-alignment": "viewport", "circle-pitch-scale": "viewport" } },
               ];
               if (pointLabel !== null) specs.push(rasterLabels ? { id: record.layers[3], type: "symbol", source, minzoom: pointLabelMinZoom,
                 filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "__moduleLabelImage"], ""]], layout: { "icon-image": ["get", "__moduleLabelImage"], "icon-offset": [0, vehicleMarkers ? 20 : 10], "icon-anchor": "top", "icon-allow-overlap": false },
                 paint: { "icon-opacity": pointAlpha } } : { id: record.layers[3], type: "symbol", source, minzoom: pointLabelMinZoom,
                 filter: ["==", ["geometry-type"], "Point"], layout: { "text-field": ["to-string", ["get", pointLabel]], "text-font": ["Noto Sans Regular"], "text-size": 12, "text-offset": [0, vehicleMarkers ? 1.8 : 1.1], "text-anchor": "top", "text-allow-overlap": false, "text-optional": true },
                 paint: { "text-color": paintColor, "text-opacity": pointAlpha, "text-halo-color": "#ffffff", "text-halo-width": 1.5 } });
-              if (vehicleMarkers) specs.push({ id: record.vehicleIconLayer, type: "symbol", source, minzoom: pointMinZoom,
-                filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "__moduleVehicleIconImage"], ""]],
-                layout: { "icon-image": ["get", "__moduleVehicleIconImage"], "icon-size": .95, "icon-anchor": "center", "icon-rotate": 0,
-                  "icon-rotation-alignment": "viewport", "icon-pitch-alignment": "viewport", "icon-allow-overlap": true, "icon-ignore-placement": true },
-                paint: { "icon-opacity": pointAlpha } });
+              if (record.iconLayer) {
+                const image = ["get", vehicleMarkers ? "__moduleVehicleIconImage" : "__modulePointIconImage"];
+                specs.push({
+                  id: record.iconLayer, type: "symbol", source, minzoom: vehicleMarkers ? pointMinZoom : pointIconMinZoom,
+                  filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", image, ""]],
+                  layout: { "icon-image": image, "icon-size": vehicleMarkers ? .95 : pointIconSize, "icon-anchor": "center", "icon-rotate": 0,
+                    "icon-rotation-alignment": "viewport", "icon-pitch-alignment": "viewport", "icon-allow-overlap": true, "icon-ignore-placement": true },
+                  paint: { "icon-opacity": pointAlpha },
+                });
+              }
               record.rasterLabels = rasterLabels;
               for (const spec of specs) {
                 this.map.addLayer(spec, this.map.getLayer(this.anchor) ? this.anchor : undefined);
@@ -466,7 +507,11 @@
           } else {
             try {
               if (record.pointLabel !== pointLabel) throw new Error("Поле подписи источника нельзя менять без перезапуска модуля");
-              if (record.pointMarker !== pointMarker || record.vehicleMarkers !== Boolean(vehicleMarkers)) throw new Error("Вид маркера источника нельзя менять без перезапуска модуля");
+              if (record.pointMarker !== pointMarker || record.vehicleMarkers !== vehicleMarkers) throw new Error("Вид маркера источника нельзя менять без перезапуска модуля");
+              if (record.pointIcon !== pointIcon || record.pointIcons !== pointIcons || record.pointIconBackground !== pointIconBackground
+                || (pointIcon !== null && (record.pointIconMinZoom !== pointIconMinZoom || record.pointIconSize !== pointIconSize))) {
+                throw new Error("Пиктограмму источника нельзя менять без перезапуска модуля");
+              }
               this.map.getSource(record.source).setData(checked.data);
               for (const [index, property] of ["fill", "line", "circle"].entries()) {
                 if (index === 2 && vehicleMarkers) continue;
@@ -475,12 +520,12 @@
               }
               if (vehicleMarkers) {
                 this.map.setPaintProperty(record.layers[2], "icon-opacity", pointAlpha);
-                this.map.setPaintProperty(record.vehicleIconLayer, "icon-opacity", pointAlpha);
               } else {
                 this.map.setPaintProperty(record.layers[2], "circle-opacity", pointAlpha);
                 this.map.setPaintProperty(record.layers[2], "circle-stroke-opacity", pointAlpha);
                 this.map.setPaintProperty(record.layers[2], "circle-radius", pointRadius);
               }
+              if (record.iconLayer) this.map.setPaintProperty(record.iconLayer, "icon-opacity", pointAlpha);
               if (pointLabel !== null) {
                 if (record.rasterLabels) this.map.setPaintProperty(record.layers[3], "icon-opacity", pointAlpha);
                 else {

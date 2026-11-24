@@ -92,14 +92,19 @@ def main():
             assert page.evaluate("map.getLayer('module-spb-metro:entrances-point').minzoom") == 15
             assert page.evaluate("map.getSource('module-spb-metro:lines-source')._data.features.length") == 6
             assert page.evaluate("map.getSource('module-spb-metro:stations-source')._data.features.length") == 75
+            assert page.evaluate("map.getLayer('module-spb-metro:stations-point-icon').minzoom") == 12
+            assert page.evaluate("map.getLayoutProperty('module-spb-metro:stations-point-icon','icon-rotation-alignment')") == 'viewport'
+            assert page.evaluate("map.getSource('module-spb-metro:stations-source')._data.features.every(f=>!!f.properties.__modulePointIconImage)")
             assert page.evaluate("map.listImages().some(id=>id.startsWith('module-spb-metro:label-'))")
             assert all('transport=subway' not in url for url in requests)
             # Labels leave first, followed by station dots. Paths remain for
             # the city overview; no extra geocoder or glyph server is involved.
             page.evaluate("""map.jumpTo({center:SloiMetro.lines.length && map.getSource('module-spb-metro:stations-source')._data.features.find(f=>f.properties.line==='2').geometry.coordinates,zoom:13,pitch:0,bearing:0})""")
             page.wait_for_function("map.queryRenderedFeatures({layers:['module-spb-metro:stations-label']}).length>0 && map.queryRenderedFeatures({layers:['module-spb-metro:stations-point']}).length>0")
+            page.wait_for_function("map.queryRenderedFeatures({layers:['module-spb-metro:stations-point-icon']}).length>0")
             page.evaluate("map.jumpTo({zoom:11})")
             page.wait_for_function("map.queryRenderedFeatures({layers:['module-spb-metro:stations-label']}).length===0 && map.queryRenderedFeatures({layers:['module-spb-metro:stations-point']}).length>0")
+            assert page.evaluate("map.queryRenderedFeatures({layers:['module-spb-metro:stations-point-icon']}).length") == 0
             page.evaluate("map.jumpTo({zoom:9})")
             page.wait_for_function("map.queryRenderedFeatures({layers:['module-spb-metro:stations-label','module-spb-metro:stations-point']}).length===0 && map.queryRenderedFeatures({layers:['module-spb-metro:lines-line']}).length>0")
             page.evaluate("themePreference='dark';applyTheme()")

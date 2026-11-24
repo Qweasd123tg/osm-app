@@ -1,8 +1,9 @@
-"""Actual WebGL drop pixels vs projected compass vectors; synthetic live feed."""
+"""Check screen-facing marker geometry and arrow heading in actual WebGL pixels."""
 import argparse
 from datetime import datetime, timezone
 from functools import partial
 from http.server import ThreadingHTTPServer
+import math
 from pathlib import Path
 import threading
 from playwright.sync_api import sync_playwright
@@ -34,12 +35,13 @@ def main():
               await moduleHost.configure('spb-live',{routes:JSON.stringify([{type:'bus',number:'49',color:'#ef2345'}])});
               await moduleHost.enable('spb-live');
               window.markerFeature=JSON.parse(JSON.stringify(map.getSource('module-spb-live:bus-source')._data.features[0]));
-              window.markerContext=moduleHost.entries.get('spb-live').session;
             }""")
             page.wait_for_function("map.queryRenderedFeatures({layers:['module-spb-live:bus-point','module-spb-live:bus-vehicle-icon']}).length>=2")
             assert page.evaluate("map.getLayer('module-spb-live:bus-point').type") == 'symbol'
-            assert page.evaluate("map.getLayoutProperty('module-spb-live:bus-point','icon-pitch-alignment')") == 'map'
+            assert page.evaluate("map.getLayoutProperty('module-spb-live:bus-point','icon-rotation-alignment')") == 'map'
+            assert page.evaluate("map.getLayoutProperty('module-spb-live:bus-point','icon-pitch-alignment')") == 'viewport'
             assert page.evaluate("map.getLayoutProperty('module-spb-live:bus-vehicle-icon','icon-rotation-alignment')") == 'viewport'
+            assert page.evaluate("map.getLayoutProperty('module-spb-live:bus-vehicle-icon','icon-pitch-alignment')") == 'viewport'
             # Capture the factory context through a test-only module, using the
             # same host renderer and real map, independent of polling timers.
             page.evaluate("""async () => {
@@ -60,29 +62,45 @@ def main():
                 result = page.evaluate("""() => new Promise(resolve=>{
                   map.once('render',()=>{
                     const gl=map.painter.context.gl, canvas=map.getCanvas(), sx=gl.drawingBufferWidth/canvas.clientWidth, sy=gl.drawingBufferHeight/canvas.clientHeight;
-                    const anchor=map.project([30.33,59.93]), e=map.project([30.3301,59.93]), n=map.project([30.33,59.93+.0001*Math.cos(59.93*Math.PI/180)]);
-                    const ex=e.x-anchor.x,ey=e.y-anchor.y,nx=n.x-anchor.x,ny=n.y-anchor.y,det=ex*ny-ey*nx;
+                    const anchor=map.project([30.33,59.93]), east=map.project([30.3301,59.93]);
+                    // With viewport pitch and map rotation, MapLibre turns
+                    // the sprite by the angle of the projected east axis.
+                    const eastAngle=Math.atan2(east.y-anchor.y,east.x-anchor.x)*180/Math.PI;
                     const x0=Math.floor((anchor.x-40)*sx), y0=Math.floor(gl.drawingBufferHeight-(anchor.y+40)*sy), w=Math.ceil(80*sx),h=Math.ceil(80*sy);
                     const pixels=new Uint8Array(w*h*4);gl.readPixels(x0,y0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+                    const isBody=(x,y)=>{
+                      const i=(y*w+x)*4;
+                      return pixels[i]>=160 && pixels[i+1]<=100 && pixels[i+2]<=125;
+                    };
                     let tip=null,count=0;
                     for(let y=0;y<h;y++)for(let x=0;x<w;x++){
-                      const i=(y*w+x)*4;
-                      if(pixels[i]<160||pixels[i+1]>100||pixels[i+2]>125)continue;
+                      if(!isBody(x,y))continue;
                       const dx=(x0+x+.5)/sx-anchor.x,dy=(gl.drawingBufferHeight-y0-y-.5)/sy-anchor.y;
                       // Ignore the separate route-number label below the body.
                       if(Math.abs(dx)>25||Math.abs(dy)>25)continue;
-                      const gx=(dx*ny-dy*nx)/det,gy=(ex*dy-ey*dx)/det,d=gx*gx+gy*gy;
-                      count++;if(!tip||d>tip.d)tip={dx,dy,gx,gy,d};
+                      const distance=Math.hypot(dx,dy);
+                      count++;if(!tip||distance>tip.distance)tip={dx,dy,distance};
                     }
-                    resolve({count,tip});
+                    // The glyph occupies the center. Sample the red part of
+                    // the 12.8px circle in every direction to catch flattening.
+                    const ring = [];
+                    for(let i=0;i<16;i++){
+                      const angle=i*Math.PI/8;
+                      const x=Math.floor((anchor.x+11*Math.cos(angle))*sx)-x0;
+                      const y=Math.floor(gl.drawingBufferHeight-(anchor.y+11*Math.sin(angle))*sy)-y0;
+                      ring.push(isBody(x,y));
+                    }
+                    resolve({count,tip,eastAngle,ring});
                   });map.triggerRepaint();
                 })""")
                 if not result['count']: page.screenshot(path='/tmp/sloi-vehicle-pixel-failure.png')
                 assert result['count'] > 20 and result['tip'], (heading,bearing,pitch,result)
-                import math
-                angle = math.degrees(math.atan2(result['tip']['gx'], result['tip']['gy'])) % 360
-                error = abs((angle-heading+180)%360-180)
-                assert error < 13, {'heading':heading,'bearing':bearing,'pitch':pitch,'measured':angle,'error':error,'pixels':result}
+                assert sum(result['ring']) >= 15, (heading,bearing,pitch,result)
+                assert 15 < result['tip']['distance'] < 20, (heading,bearing,pitch,result)
+                angle = math.degrees(math.atan2(result['tip']['dx'], -result['tip']['dy'])) % 360
+                expected = (heading + result['eastAngle']) % 360
+                error = abs((angle-expected+180)%360-180)
+                assert error < 13, {'heading':heading,'bearing':bearing,'pitch':pitch,'expected':expected,'measured':angle,'error':error,'pixels':result}
                 measurements.append((heading,bearing,pitch,round(angle,1)))
             page.evaluate("setProofMarker(null)")
             unknown = page.evaluate("map.getSource('module-marker-proof:vehicles-source')._data.features[0].properties")
@@ -99,6 +117,9 @@ def main():
             page.wait_for_function("moduleHost.get('spb-stops').status==='ready' && map.getSource('module-spb-stops:stops-source')._data.features.length>0")
             assert page.evaluate("map.getLayer('module-spb-stops:stops-point').minzoom") == 15
             assert page.evaluate("map.getLayer('module-spb-stops:stops-label').minzoom") == 16
+            assert page.evaluate("map.getLayer('module-spb-stops:stops-point-icon').minzoom") == 16
+            assert page.evaluate("map.getLayoutProperty('module-spb-stops:stops-point-icon','icon-pitch-alignment')") == 'viewport'
+            assert page.evaluate("map.getSource('module-spb-stops:stops-source')._data.features.every(f=>!!f.properties.__modulePointIconImage)")
             page.evaluate("map.jumpTo({center:[30.33,59.93],bearing:0,pitch:0,zoom:14})")
             page.wait_for_function("map.getSource('module-spb-stops:stops-source')._data.features.length===0")
             page.evaluate("map.jumpTo({bearing:0,pitch:0,zoom:16});setProofMarker(45)")
@@ -106,7 +127,7 @@ def main():
             page.evaluate("moduleHost.disable('marker-proof')")
             assert page.evaluate("!map.listImages().some(id=>id.startsWith('module-marker-proof:'))")
             assert not errors, errors
-            print('Vehicle drop pixels OK:',measurements,'; 3 distinct upright glyphs, neutral unknown course, complete cleanup')
+            print('Screen-facing vehicle circle/arrow pixels OK:',measurements,'; 3 distinct upright glyphs, neutral unknown course, static stop icons, complete cleanup')
             browser.close()
     finally:
         server.shutdown(); server.server_close()

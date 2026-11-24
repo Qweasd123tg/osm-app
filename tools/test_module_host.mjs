@@ -58,6 +58,11 @@ assert.equal(map.sources.get('module-places:points-source').data.features.length
 assert.equal(host.get('places').bounds,null);assert.equal(host.get('places').status,'ready');
 contexts[0].setGeoJson('points',data);assert.equal(map.sources.size,1);
 assert.deepEqual(plain(host.get('places').bounds),[[30.3,59.9],[30.3,59.9]]);
+const simpleIcon = contexts[0].setGeoJson('stop',data,{pointIcon:'bus',pointMinZoom:15});
+assert.deepEqual(plain(simpleIcon.layerIds),['module-places:stop-fill','module-places:stop-line','module-places:stop-point'],
+  'Without sprite APIs a point icon falls back to the ordinary circle');
+assert.equal(map.layers.get('module-places:stop-point').minzoom,15);
+assert.equal(map.sources.get(simpleIcon.sourceId).data.features[0].properties.__modulePointIconImage,undefined);
 
 await host.configure('places',{opacity:.4});
 assert(contexts[0].signal.aborted);assert.equal(cleaned,1);assert.equal(map.sources.size,1);assert.equal(map.events.size,1);assert.equal(host.get('places').settings.opacity,.4);

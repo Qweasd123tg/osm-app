@@ -39,7 +39,7 @@ function harness(fetch, canvasLabels=false) {
 }
 
 // The real module starts silently disabled and respects the official NE/SW bbox.
-let h=harness(async()=>response([vehicle(1)]));
+let h=harness(async()=>response([vehicle(1),vehicle(2,'tram','3'),vehicle(3,'trolley','17')]));
 assert.equal(h.requests.length,0);assert.equal(h.host.get('spb-live').enabled,false);
 await h.host.enable('spb-live');
 assert.equal(h.host.get('spb-live').status,'ready');assert.equal(h.requests.length,1);
@@ -47,7 +47,9 @@ let request=new URL(h.requests[0].url);
 assert.equal(request.pathname,'/api/visary/geometry/vehicle');assert.equal(request.searchParams.get('bbox'),'30.34500,59.94000,30.31000,59.92000');
 assert.equal(request.searchParams.get('transport'),'bus,tram,trolley');assert.equal(h.requests[0].options.cache,'no-store');
 assert.equal(h.sources.size,3);assert.equal(h.layers.size,13);assert.equal(h.data().features[0].properties.name,'49 · Автобус');
-assert.equal(h.data().features[0].properties.label,'49');assert.equal(h.data().features[0].properties.color,'#b76c18');
+assert.equal(h.data().features[0].properties.label,'49');
+assert.deepEqual(['bus','tram','trolley'].map(type=>h.data(type).features[0].properties.color),
+  ['#1a73f0','#eb5a2b','#e9a300'],'Default markers use a distinct color for each transport mode');
 assert.equal(h.data().features[0].properties.kind,'vehicle');assert.equal(h.data().features[0].properties.timeConfirmed,true);
 assert.equal(h.data().features[0].properties.statusText,'Позиция от 16:22:29 · Получено 16:22:37 · Курс 341°');
 assert.equal(h.layers.get('module-spb-live:bus-label').layout['text-field'][1][1],'label');
@@ -122,7 +124,7 @@ assert.equal(new URL(h.requests[0].url).searchParams.get('transport'),'bus,tram,
 assert.equal(h.data().features.length,1);assert.equal(h.data('tram').features.length,1);assert.equal(h.data('trolley').features.length,1);
 assert.equal(h.data().features[0].properties.color,'#1565c0');
 assert.equal(h.data().features[0].properties.__moduleColor,'#1565c0');
-assert.deepEqual(plain(h.layers.get('module-spb-live:bus-point').paint['circle-color']),['coalesce',['get','__moduleColor'],'#b76c18']);
+assert.deepEqual(plain(h.layers.get('module-spb-live:bus-point').paint['circle-color']),['coalesce',['get','__moduleColor'],'#1a73f0']);
 assert.deepEqual([...h.host.entry('spb-live').session.labelImages.keys()].sort(),['#006c4c|17','#1565c0|49','#b3261e|49']);
 assert.equal(h.images.size,3,'Only the three visible route badges are allocated');
 const firstColorImages=new Map(h.images);
@@ -134,7 +136,7 @@ assert.equal(h.images.size,1);assert([...firstColorImages].every(([id,image])=>h
 await h.host.configure('spb-live',{routes:'[]'});const emptyRequests=h.requests.length;
 assert.equal(h.images.size,0);await h.advance(64000);assert.equal(h.requests.length,emptyRequests);
 await h.host.configure('spb-live',{routes:'',bus:true,route:'49'});assert.equal(h.data().features.length,1);
-assert.equal(h.data().features[0].properties.color,'#b76c18','Leaving a preset restores legacy type colors');
+assert.equal(h.data().features[0].properties.color,'#1a73f0','Leaving a preset restores transport mode colors');
 await h.host.configure('spb-live',{routes:'null'});assert.equal(h.host.get('spb-live').status,'error');
 assert.equal(h.sources.size,0);assert.equal(h.images.size,0);assert.equal(h.timers.size,0);assert.equal(h.visibility.size,0);h.host.dispose();
 

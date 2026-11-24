@@ -14,32 +14,126 @@
   const iconPaths = {
     walk: '<circle cx="13" cy="4" r="2"/><path d="m10 9 3-2 3 5 4 1M13 7l-2 7-5 6m5-6 5 6M10 9l-4 3"/>',
     bicycle: '<circle cx="5.5" cy="16.5" r="4"/><circle cx="18.5" cy="16.5" r="4"/><path d="m5.5 16.5 5-9 8 9M5.5 16.5h9L9 6H6m8-2h3l2 4"/>',
-    bus: '<rect x="5" y="3" width="14" height="17" rx="3"/><path d="M5 11h14M8 3v8m8-8v8M8 20v2m8-2v2M8 16h1m6 0h1"/>',
-    subway: '<path d="M4 20V5h4l4 8 4-8h4v15M7 20V9l5 10 5-10v11"/>',
-    tram: '<rect x="5" y="6" width="14" height="14" rx="3"/><path d="m9 6 3-4 3 4M5 13h14M9 20l-2 2m8-2 2 2M8 17h1m6 0h1"/>',
-    trolley: '<rect x="5" y="7" width="14" height="13" rx="3"/><path d="m9 7 3-6m3 6 3-6M5 13h14M8 20v2m8-2v2M8 17h1m6 0h1"/>',
     train: '<rect x="5" y="3" width="14" height="17" rx="4"/><path d="M5 11h14M12 3v8M9 20l-2 2m8-2 2 2M8 16h1m6 0h1"/>',
     ferry: '<path d="M3 15 12 11l9 4-4 5H7ZM7 13V6h10v7M10 6V3h4v3M2 22l4-1 6 1 6-1 4 1"/>',
     locate: '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/>',
     pin: '<path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.5"/>',
   };
   function icon(kind) {
+    const transport = root.SloiTransportSymbols?.create(kind === "subway" ? "metro" : kind, "routing-icon");
+    if (transport) return transport;
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "routing-icon"); svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.8");
     svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
     svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
-    svg.innerHTML = iconPaths[kind] || iconPaths.bus;
+    svg.innerHTML = iconPaths[kind] || iconPaths.pin;
     return svg;
   }
   const legIcon = leg => leg.mode !== "transit" ? leg.mode : ({ trolleybus: "trolley", rail: "train", metro: "subway" }[leg.type] || leg.type);
-  const routeColors = Object.freeze({ walk: "#3974d5", bicycle: "#237a57", bus: "#b66a1a", tram: "#c14d52", trolley: "#15817e", subway: "#8261c8", transit: "#b66a1a" });
+  const routeColors = Object.freeze({
+    walk: "#23b34b", bicycle: "#168a85", bus: "#1a73f0", tram: "#eb5a2b",
+    trolley: "#e9a300", subway: "#9b4db2", transit: "#1a73f0",
+  });
   const legColor = leg => routeColors[leg.mode === "transit" ? legIcon(leg) : leg.mode] || routeColors.transit;
   const transferLabel = transfers => {
     if (transfers === 0) return "Без пересадок";
     const last = transfers % 10, lastTwo = transfers % 100;
     return `${transfers} ${lastTwo >= 11 && lastTwo <= 14 ? "пересадок" : last === 1 ? "пересадка" : last >= 2 && last <= 4 ? "пересадки" : "пересадок"}`;
   };
+
+  function routeBounds(geometry, from, to) {
+    const lines = geometry?.type === "LineString" ? [geometry.coordinates]
+      : geometry?.type === "MultiLineString" && Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+    let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+    function include(point) {
+      if (!Array.isArray(point) || point.length !== 2) return;
+      const [lon, lat] = point;
+      if (!Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lon) > 180 || Math.abs(lat) > 85) return;
+      west = Math.min(west, point[0]); east = Math.max(east, point[0]);
+      south = Math.min(south, point[1]); north = Math.max(north, point[1]);
+    }
+    for (const line of lines) if (Array.isArray(line)) for (const point of line) include(point);
+    if (!Number.isFinite(west) || west === east && south === north) return null;
+    // A provider may snap the line to the street some distance from an A/B pin.
+    include(from); include(to);
+    return [[west, south], [east, north]];
+  }
+
+  function routeViewport(canvas, panel) {
+    const frame = canvas.getBoundingClientRect();
+    // offsetTop gives the final position during the sheet's entrance animation.
+    let area = { left: 0, top: 0, right: frame.width, bottom: Math.min(frame.height, panel.offsetTop - frame.top) };
+    const size = box => (box.right - box.left) * (box.bottom - box.top);
+    const usable = box => box.right - box.left >= 32 && box.bottom - box.top >= 32;
+    for (const control of document.querySelectorAll(".bottom-nav, .connection.is-visible, .map-toolbar:not([hidden]), .map-actions, .topbar, .map-scale, .maplibregl-ctrl-attrib")) {
+      const rect = control.getBoundingClientRect();
+      if (!rect.width || !rect.height || root.getComputedStyle(control).visibility === "hidden") continue;
+      const left = rect.left - frame.left, right = rect.right - frame.left;
+      const top = rect.top - frame.top, bottom = rect.bottom - frame.top;
+      if (right <= area.left || left >= area.right || bottom <= area.top || top >= area.bottom) continue;
+      // A side button on a short screen can cost less width than height.
+      const available = [{ ...area, top: bottom }, { ...area, bottom: top },
+        { ...area, left: right }, { ...area, right: left }].filter(usable);
+      if (!available.length) return null;
+      area = available.reduce((largest, box) => size(box) > size(largest) ? box : largest);
+    }
+    if (!usable(area)) return null;
+    const margin = Math.min(20, (area.right - area.left) / 8, (area.bottom - area.top) / 8);
+    return { left: area.left + margin, top: area.top + margin, right: area.right - margin, bottom: area.bottom - margin };
+  }
+
+  function fitRoute(map, panel, route, from, to) {
+    const bounds = routeBounds(route.geometry, from, to);
+    if (!bounds) return;
+    const canvas = map.getCanvas(), container = map.getContainer();
+    // A route can finish just after rotation or a WebView resize.
+    if (canvas.clientWidth !== container.clientWidth || canvas.clientHeight !== container.clientHeight) map.resize();
+    const area = routeViewport(canvas, panel);
+    if (!area) return;
+    const maxZoom = Math.min(map.getMaxZoom(), 17), bearing = map.getBearing(), pitch = map.getPitch();
+    const flat = map.cameraForBounds(bounds, { maxZoom });
+    if (!flat) return;
+    const target = flat.center;
+    const [[west, south], [east, north]] = bounds;
+    const corners = [[west, south], [west, north], [east, south], [east, north]].map(point => root.maplibregl.LngLat.convert(point));
+    const midpoint = { x: (area.left + area.right) / 2, y: (area.top + area.bottom) / 2 };
+    // MapLibre's cameraForBounds calculates the scale in 2D. Project the
+    // corners with a scratch copy of the pinned 4.7 transform to keep the
+    // real bearing, pitch and padding without moving the live camera twice.
+    const transform = map.transform.clone();
+    function atZoom(zoom) {
+      transform.zoom = zoom;
+      transform.center = target;
+      transform.setLocationAtPoint(target, midpoint);
+      const fits = corners.every(corner => {
+        const point = transform.locationPoint(corner);
+        return point.x >= area.left && point.x <= area.right && point.y >= area.top && point.y <= area.bottom;
+      });
+      return fits ? { center: transform.center, zoom: transform.zoom } : null;
+    }
+    let camera = atZoom(maxZoom);
+    if (!camera) {
+      // Start near the route scale; the world limits can prevent centering a
+      // mid-latitude route high in the screen at the map's minimum zoom.
+      const minZoom = map.getMinZoom();
+      let low = Math.max(minZoom, flat.zoom), high = maxZoom;
+      camera = atZoom(low);
+      while (!camera && low > minZoom) {
+        high = low;
+        low = Math.max(minZoom, low - 1);
+        camera = atZoom(low);
+      }
+      if (!camera) return;
+      for (let i = 0; i < 12; i++) {
+        const zoom = (low + high) / 2, candidate = atZoom(zoom);
+        if (candidate) { low = zoom; camera = candidate; }
+        else high = zoom;
+      }
+    }
+    const reducedMotion = root.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    map.easeTo({ ...camera, pitch, bearing, duration: reducedMotion ? 0 : 450 });
+  }
 
   function install(options) {
     const map = options?.map;
@@ -234,7 +328,13 @@
     }
 
     function routeFeatures(route, from, to) {
-      const features = route.legs.map(leg => ({ type: "Feature", properties: { kind: leg.mode, transportType: leg.type || leg.mode, routeColor: legColor(leg) }, geometry: leg.geometry }));
+      const features = route.legs.map(leg => ({
+        type: "Feature", geometry: leg.geometry,
+        properties: {
+          kind: leg.mode, transportType: leg.type || leg.mode, routeColor: legColor(leg),
+          walkConnector: route.mode === "transit" && leg.mode === "walk",
+        },
+      }));
       const seen = new Set();
       for (const leg of route.legs) for (const stop of leg.stops || []) {
         const key = stop.coordinates.join(","); if (seen.has(key)) continue; seen.add(key);
@@ -250,24 +350,34 @@
       map.addSource(SOURCE, { type: "geojson", data: empty() }); source = map.getSource(SOURCE);
       const before = map.getLayer("selected-location") ? "selected-location" : undefined;
       const isLine = ["==", ["geometry-type"], "LineString"];
-      map.addLayer({ id: LAYERS[0], type: "line", source: SOURCE, filter: isLine, layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#ffffff", "line-width": 8, "line-opacity": .8 } }, before);
-      map.addLayer({ id: LAYERS[1], type: "line", source: SOURCE, filter: ["all", isLine, ["!=", ["get", "kind"], "walk"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "routeColor"], "line-width": 5 } }, before);
-      map.addLayer({ id: LAYERS[2], type: "line", source: SOURCE, filter: ["all", isLine, ["==", ["get", "kind"], "walk"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": routeColors.walk, "line-width": 4, "line-dasharray": [1, 1.4] } }, before);
+      const walkConnector = ["==", ["get", "walkConnector"], true];
+      const solidRoute = ["all", isLine, ["!", walkConnector]];
+      const roundedLine = { "line-cap": "round", "line-join": "round" };
+      const lineColor = ["get", "routeColor"];
+      map.addLayer({
+        id: LAYERS[0], type: "line", source: SOURCE, filter: solidRoute, layout: roundedLine,
+        paint: { "line-color": "#10191f", "line-width": 6.5, "line-opacity": .75 },
+      }, before);
+      map.addLayer({
+        id: LAYERS[1], type: "line", source: SOURCE, filter: solidRoute, layout: roundedLine,
+        paint: { "line-color": lineColor, "line-width": 5 },
+      }, before);
+      map.addLayer({
+        id: LAYERS[2], type: "line", source: SOURCE, filter: ["all", isLine, walkConnector], layout: roundedLine,
+        paint: { "line-color": lineColor, "line-width": 4, "line-dasharray": [1, 1.4] },
+      }, before);
       map.addLayer({ id: LAYERS[3], type: "circle", source: SOURCE, minzoom: 15, filter: ["==", ["get", "kind"], "stop"], paint: { "circle-color": "#ffffff", "circle-radius": 4, "circle-stroke-color": ["get", "routeColor"], "circle-stroke-width": 2 } }, before);
       map.addLayer({ id: LAYERS[4], type: "circle", source: SOURCE, filter: ["==", ["get", "kind"], "endpoint"], paint: { "circle-color": "#3974d5", "circle-radius": 6, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 } }, before);
     }
 
-    function showRoute(route, from, to, fit = false) {
+    function showRoute(route, from, to, fit) {
       ensureSource(); source.setData(routeFeatures(route, from, to)); selectedRoute = route; updateDraftMarkers();
       resume.textContent = `${duration(route.duration)} · ${distance(route.distance)}`;
       chip.hidden = opened;
-      const lines = route.geometry.type === "LineString" ? [route.geometry.coordinates] : route.geometry.coordinates;
-      let west = 180, east = -180, south = 90, north = -90;
-      for (const line of lines) for (const point of line) { west = Math.min(west, point[0]); east = Math.max(east, point[0]); south = Math.min(south, point[1]); north = Math.max(north, point[1]); }
-      const height = map.getCanvas().clientHeight;
-      if (fit) map.fitBounds([[west, south], [east, north]], { padding: { top: 60, right: 32, left: 32, bottom: Math.min(220, Math.max(60, height * .25)) }, maxZoom: 17, pitch: map.getPitch(), bearing: map.getBearing(), duration: root.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 400 });
       attribution.replaceChildren();
       for (const item of route.attribution) { const link = node("a", "", item.title); link.href = item.url; link.target = "_blank"; link.rel = "noopener noreferrer"; attribution.append(link); }
+      renderSteps(route);
+      if (fit) fitRoute(map, panel, route, from, to);
     }
 
     function renderRoutes(routes, from, to) {
@@ -298,13 +408,14 @@
         }
         button.append(top, meta, legs);
         button.addEventListener("click", () => {
+          if (disposed || !opened || button.parentNode !== results) return;
           for (const row of results.querySelectorAll(".routing-option")) row.setAttribute("aria-pressed", String(row === button));
-          showRoute(route, from, to); renderSteps(route);
+          showRoute(route, from, to, true);
         }); results.append(button);
       });
       results.scrollLeft = 0;
       form.scrollTop = 0;
-      showRoute(routes[0], from, to, fitOnReady); renderSteps(routes[0]);
+      showRoute(routes[0], from, to, fitOnReady);
     }
 
     function renderSteps(route) {
@@ -354,7 +465,7 @@
         }
         status.textContent = "Строю маршрут…";
         const routes = await root.SloiRouting.plan({ from: origin, to: destination, mode: requestMode, preferences, signal: request.signal });
-        if (disposed || request.signal.aborted || current !== generation) return;
+        if (disposed || !opened || request.signal.aborted || current !== generation) return;
         renderRoutes(routes, origin, destination); status.textContent = "";
       } catch (error) {
         if (current === generation && !request.signal.aborted) status.textContent = error.message || "Не удалось построить маршрут";

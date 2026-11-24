@@ -128,6 +128,8 @@ const elements = {
   demoButton: $("load-demo"),
 };
 
+$("transport-open").replaceChildren(window.SloiTransportSymbols.create("bus"));
+
 function showFatal(message) {
   elements.loading.classList.add("is-hidden");
   elements.fatalMessage.textContent = String(message || "Неизвестная ошибка");
@@ -1451,10 +1453,11 @@ function renderSearchResults(result) {
   for (const route of result.transport) {
     const button = document.createElement("button"); button.type = "button"; button.className = "place-result";
     button.dataset.searchResult = `transport:${route.id}`;
+    button.classList.add("transport-result");
     const number = document.createElement("strong"); number.className = "transport-result-number";
     number.textContent = route.settings?.route || route.title;
     const kind = document.createElement("span"); kind.className = "transport-result-type"; kind.textContent = "Автобус";
-    button.append(number, kind);
+    button.append(window.SloiTransportSymbols.create("bus"), number, kind);
     button.setAttribute("aria-label", `Автобус ${route.settings?.route || route.title}`);
     button.addEventListener("click", async () => {
       cancelSearch(); button.disabled = true;
@@ -3052,6 +3055,7 @@ try {
       return style;
     })(),
   });
+  window.SloiBasemapRecovery.install({ map, document });
   window.SloiMapGestures.install(map, { onActiveChange(active) {
     mapTouchActive = active;
     if (!active && mapReady) { scheduleViewportTiles(); scheduleShadowViewport(); showFrame(state.frame, false); }

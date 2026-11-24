@@ -28,6 +28,18 @@ def check_viewport(browser, origin, width, height):
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(origin)
     wait_for_map(page)
+    if width < 800:
+        page.evaluate("closeSheet();document.querySelector('.maplibregl-ctrl-attrib').classList.add('maplibregl-compact-show')")
+        assert page.locator('.maplibregl-ctrl-attrib').evaluate("""node=>{
+          const a=node.getBoundingClientRect();
+          const overlaps=selector=>{const b=document.querySelector(selector).getBoundingClientRect();return a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top};
+          return a.left>=0&&a.top>=0&&a.right<=innerWidth&&!overlaps('.topbar')&&!overlaps('.bottom-nav');
+        }"""), 'Expanded source credits must stay clear of map controls'
+        # Source attribution is normally supplied by the remote TileJSON. This
+        # fixture blocks remote requests, so add known source text to verify
+        # that the existing control still exposes its credit links.
+        page.evaluate("map.getSource('openmaptiles').attribution='<a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a>';map.fire('sourcedata',{sourceId:'openmaptiles',sourceDataType:'metadata'})")
+        assert page.locator('.maplibregl-ctrl-attrib a[href*="openstreetmap"]').count() > 0
     open_panel(page, "search")
     # Slow software rendering can delay the transition's first frame. Wait for
     # its actual transform to settle before treating its geometry as invariant.
