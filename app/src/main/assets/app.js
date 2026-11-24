@@ -1,11 +1,28 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const fallbackData = window.SLOI_MAP_DATA;
-let data = fallbackData;
-let sceneDataStatus = String(fallbackData?.buildings?.features?.length || 0) + " зданий · встроенный район";
+let fallbackData = null;
+let data = null;
+let selectedPlace = null;
+let selectedPlaceNameRequest = null;
+let demoPromise = null;
+let navigationGeneration = 0;
+let cameraInputGeneration = 0;
+let locationGeneration = 0;
+let sceneDataStatus = "OpenStreetMap · выберите место или добавьте свой слой";
 let map = null;
+let offlineBasemap = null;
+let offlinePlaceState = null;
+let offlinePlaceRevision = "";
+let searchNeedsRefresh = false;
+let routingUI = null;
+let transportUI = null;
+let transportPresets = null;
 let mapReady = false;
+let mapTouchActive = false;
+let shadowExtensionActive = false;
+let shadowRefreshTimer = null;
+let shadowFailedView = null;
 let popup = null;
 let playbackTimer = null;
 let tileErrorTimer = null;
@@ -18,6 +35,13 @@ let activeSceneId = null;
 let pendingScene = null;
 let sceneWatchdog = null;
 let layerRuntime = null;
+let moduleHost = null;
+let activePanel = "layers";
+let sheetOpener = null;
+let settingsOpener = null;
+let activeSettingsPanel = "settings";
+let sliderFrame = null;
+const retainedFrames = new Map();
 let styleFrame = null;
 let renderedShadowGeometry;
 let lastSavedState = null;
@@ -25,6 +49,7 @@ let economyMode = false;
 try { economyMode = localStorage.getItem("sloi-economy-mode") === "true"; } catch (_) { /* Optional preference. */ }
 const customLayers = new Map();
 const cityPacks = new Map();
+const cityPackControls = new Map();
 const viewport = {
   epoch: 0,
   requestId: null,
@@ -95,8 +120,12 @@ const elements = {
   sceneRecalculate: $("scene-recalculate"),
   sceneToday: $("scene-today"),
   cancelScene: $("cancel-scene"),
+  cancelShadowScene: $("cancel-shadow-scene"),
+  shadowStatus: $("shadow-status"),
   economyMode: $("economy-mode"),
   retryFrame: $("retry-frame"),
+  timeCard: $("time-card"),
+  demoButton: $("load-demo"),
 };
 
 function showFatal(message) {
@@ -108,6 +137,15 @@ function showFatal(message) {
 window.SloiApp = {
   showFatal,
   closeTransientUi() {
+    if (!$("settings-page").hidden) {
+      backSettingsPage();
+      return true;
+    }
+    if (transportUI?.isOpen()) { transportUI.back(); return true; }
+    if (routingUI?.isOpen?.()) {
+      if (routingUI.back) routingUI.back(); else routingUI.close();
+      return true;
+    }
     if (elements.sheet.classList.contains("is-open")) {
       closeSheet();
       return true;
@@ -121,18 +159,19 @@ window.SloiApp = {
   },
 };
 
-if (!fallbackData || !fallbackData.region || !Array.isArray(fallbackData.shadeFrames)) {
-  showFatal("В APK отсутствуют данные карты");
-  throw new Error("SLOI_MAP_DATA is missing or malformed");
-}
+offlineBasemap = window.SloiOfflineBasemap.install({
+  host: window.AndroidHost, getMap: () => map, document, callbacks: window.SloiApp,
+  formatBytes, onUseChange: () => updateOnlineState(),
+});
+
 if (typeof maplibregl === "undefined") {
   showFatal("В APK отсутствует MapLibre");
   throw new Error("MapLibre is missing");
 }
 
-let frames = data.shadeFrames;
+let frames = [];
 let windAvailable = false;
-const defaultFrame = Math.max(0, frames.findIndex((frame) => frame.label === "15:00"));
+let defaultFrame = 0;
 const layerSettings = window.SloiLayerSettings;
 const layerLibrary = new window.SloiLayerLibrary.Library();
 const layerControls = new Map();
@@ -180,6 +219,14 @@ function createLayerControls(layer) {
     card, up, down, toggle: $(`${prefix}-toggle`),
     opacity: $(`${prefix}-opacity`), output: $(`${prefix}-opacity-value`),
   };
+  const options = card.querySelector(".layer-options");
+  if (["shadows", "wind", "sun"].includes(layer.id)) card.hidden = true;
+  if (options && !options.closest("details")) {
+    const detail = document.createElement("details");
+    detail.className = "layer-options-details";
+    const summary = document.createElement("summary"); summary.textContent = "Настроить";
+    options.replaceWith(detail); detail.append(summary, options);
+  }
   controls.toggle.addEventListener("change", () => {
     if (layer.custom) {
       state.customLayers[layer.id] = { ...settingsForLayer(layer), enabled: controls.toggle.checked };
@@ -222,14 +269,186 @@ function stateOptions() {
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem("sloi-map-state") || "{}");
-    return layerSettings.normalizeState(saved, stateOptions());
+    const normalized = layerSettings.normalizeState({ mode: "2d", ...saved }, stateOptions());
+    if (localStorage.getItem("sloi-building-transparency-v1") !== "done") {
+      normalized.buildingOpacity = Math.min(normalized.buildingOpacity, .65);
+      // Write the migrated value first so a completed marker cannot retain an
+      // old opaque value. Later opacity changes remain the user's preference.
+      try {
+        localStorage.setItem("sloi-map-state", JSON.stringify(normalized));
+        localStorage.setItem("sloi-building-transparency-v1", "done");
+      } catch (error) { console.warn("Could not persist building transparency", error); }
+    }
+    return normalized;
   } catch (error) {
     console.warn("Could not restore state", error);
-    return layerSettings.normalizeState(null, stateOptions());
+    return layerSettings.normalizeState({ mode: "2d" }, stateOptions());
   }
 }
 
 const state = loadState();
+// Optional calculations are enabled by extensions, never by legacy demo state.
+state.shadows = false;
+state.wind = false;
+state.sun = false;
+let savedCamera = null;
+try { savedCamera = window.SloiMapCamera.load(localStorage); } catch (_) { /* Map works without storage. */ }
+if (!savedCamera) state.mode = "2d";
+let storedPitch = state.mode === "3d" ? (savedCamera?.pitch || 56) : 0;
+try {
+  const savedPitch = JSON.parse(localStorage.getItem("sloi-pitch-angle"));
+  if (state.mode === "3d" && typeof savedPitch === "number" && savedPitch > 0 && savedPitch <= 60) storedPitch = savedPitch;
+} catch (_) {}
+const pitchController = window.SloiMapCamera.createPitchController(storedPitch);
+let themePreference = "system";
+try { themePreference = localStorage.getItem("sloi-theme") || "system"; } catch (_) {}
+const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+function applyTheme() {
+  let prefersDark = systemTheme.matches;
+  try { if (window.AndroidHost?.isDarkTheme) prefersDark = window.AndroidHost.isDarkTheme(); } catch (_) {}
+  const dark = themePreference === "dark" || (themePreference === "system" && prefersDark);
+  const themeChanged = document.documentElement.dataset.theme !== (dark ? "dark" : "light");
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  state.basemap = dark ? "dark" : "light";
+  document.querySelector('meta[name="theme-color"]').content = dark ? "#24272d" : "#ffffff";
+  for (const button of document.querySelectorAll("#theme-options button")) button.setAttribute("aria-pressed", String(button.dataset.theme === themePreference));
+  try { window.AndroidHost?.setSystemBarTheme?.(dark); } catch (_) {}
+  if (mapReady) applyMapState();
+  if (mapReady && themeChanged && moduleHost) {
+    for (const id of ["spb-metro", "spb-stops"]) if (moduleHost.entries.has(id) && moduleHost.get(id).enabled) {
+      // Locally rasterized text halos follow the basemap without moving it.
+      moduleHost.refresh(id).catch(error => console.debug("Transit theme refresh", error));
+    }
+  }
+}
+systemTheme.addEventListener("change", applyTheme);
+applyTheme();
+
+const moduleCards = new Map();
+function renderModules(snapshots) {
+  const statuses = { disabled: "Выключен", loading: "Загрузка…", ready: "На карте", paused: "Приостановлен", error: "Не удалось загрузить" };
+  for (const module of snapshots) {
+    let controls = moduleCards.get(module.id);
+    if (!controls) {
+      const card = document.createElement("section");
+      card.className = "module-card";
+      card.dataset.module = module.id;
+      const heading = document.createElement("div");
+      heading.className = "module-heading";
+      const copy = document.createElement("div");
+      copy.className = "module-copy";
+      const title = document.createElement("strong"); title.textContent = module.title;
+      copy.append(title);
+      const toggleLabel = document.createElement("label"); toggleLabel.className = "switch";
+      const toggle = document.createElement("input"); toggle.type = "checkbox";
+      toggle.setAttribute("aria-label", `Модуль ${module.title}`);
+      toggle.addEventListener("change", () => toggle.checked ? moduleHost.enable(module.id) : moduleHost.disable(module.id));
+      toggleLabel.append(toggle, document.createElement("span"));
+      heading.append(copy, toggleLabel);
+      const status = document.createElement("p"); status.className = "module-status"; status.setAttribute("role", "status");
+      const form = document.createElement("form"); form.className = "module-settings";
+      const fields = new Map();
+      for (const spec of window.SloiNativeShadows?.controls[module.id] || window.SloiMetro?.controls[module.id] || window.SloiLiveTransport?.controls[module.id] || window.SloiBundledModules.controls[module.id] || []) {
+        const label = document.createElement("label"); label.textContent = spec.label;
+        const input = document.createElement(spec.type === "select" ? "select" : "input");
+        input.setAttribute("aria-label", `${module.title}: ${spec.label}`);
+        if (spec.type === "select") for (const choice of spec.options) {
+          const option = document.createElement("option"); option.value = String(choice.value); option.textContent = choice.label; input.append(option);
+        } else input.type = spec.type;
+        for (const key of ["min", "max", "step", "maxLength"]) if (spec[key] !== undefined) input[key] = spec[key];
+        if (spec.type !== "checkbox") input.value = String(module.settings[spec.key]); else input.checked = module.settings[spec.key];
+        fields.set(spec.key, input); label.append(input); form.append(label);
+      }
+      const apply = document.createElement("button"); apply.type = "submit"; apply.className = "secondary-button"; apply.textContent = "Применить";
+      form.append(apply);
+      form.hidden = fields.size === 0;
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const patch = {};
+        for (const [key, input] of fields) patch[key] = typeof module.settings[key] === "boolean" ? input.checked : typeof module.settings[key] === "number" ? Number(input.value) : input.value;
+        try {
+          if (module.id === "spb-live") { patch.routes = ""; transportPresets?.clearActive(); }
+          await moduleHost.configure(module.id, patch);
+        } catch (error) {
+          status.textContent = error.message;
+          settingsStatus.textContent = error.message;
+          settingsStatus.hidden = false;
+        }
+      });
+      const retry = document.createElement("button"); retry.type = "button"; retry.className = "secondary-button"; retry.textContent = "Повторить";
+      retry.addEventListener("click", () => moduleHost.enable(module.id));
+      const locate = document.createElement("button"); locate.type = "button"; locate.className = "secondary-button"; locate.textContent = "На карте";
+      locate.setAttribute("aria-label", `Показать модуль ${module.title} на карте`);
+      locate.addEventListener("click", () => { const bounds = moduleHost.get(module.id).bounds; if (bounds) { closeSheet(); map.fitBounds(bounds, { padding: 100, maxZoom: 16, duration: 500 }); } });
+      const configuration = document.createElement("section"); configuration.className = "module-configuration";
+      configuration.dataset.moduleSettings = module.id;
+      const settingsTitle = document.createElement("h3"); settingsTitle.textContent = module.title;
+      const settingsStatus = document.createElement("p"); settingsStatus.className = "module-status";
+      settingsStatus.setAttribute("role", "status"); settingsStatus.hidden = true;
+      configuration.append(settingsTitle, form, settingsStatus, locate);
+      $("module-settings-list").append(configuration);
+      card.append(heading, status, retry); $(module.example ? "example-module-list" : "module-list").append(card);
+      if (["spb-metro", "spb-live"].includes(module.id)) {
+        const browse = document.createElement("button"); browse.type = "button"; browse.className = "secondary-button";
+        browse.textContent = module.id === "spb-metro" ? "Линии метро" : "Наборы маршрутов";
+        browse.addEventListener("click", () => transportUI?.open(module.id === "spb-metro" ? "metro" : "presets"));
+        card.append(browse);
+      }
+      if (module.id === "shadows") card.append(elements.cancelShadowScene);
+      controls = { card, toggle, status, settingsStatus, retry, locate, fields, settingsSignature: JSON.stringify(module.settings) }; moduleCards.set(module.id, controls);
+    }
+    controls.toggle.checked = module.enabled;
+    controls.card.dataset.status = module.status;
+    controls.status.textContent = module.error || module.storageWarning || statuses[module.status];
+    if (module.id === "shadows" && module.enabled && elements.shadowStatus.textContent) controls.status.textContent = elements.shadowStatus.textContent;
+    controls.status.hidden = !module.error && !module.storageWarning && module.status !== "loading"
+      && ["Выключен", "На карте", "Приостановлен"].includes(controls.status.textContent);
+    controls.settingsStatus.textContent = module.error || module.storageWarning || "";
+    controls.settingsStatus.hidden = !controls.settingsStatus.textContent;
+    controls.settingsStatus.classList.toggle("is-error", Boolean(module.error));
+    controls.retry.hidden = module.status !== "error";
+    controls.locate.hidden = module.status !== "ready" || !module.bounds;
+    const settingsSignature = JSON.stringify(module.settings);
+    if (controls.settingsSignature !== settingsSignature) {
+      for (const [key, input] of controls.fields) {
+        if (input.type === "checkbox") input.checked = module.settings[key]; else input.value = String(module.settings[key]);
+      }
+      controls.settingsSignature = settingsSignature;
+    }
+  }
+  updateActiveCount(snapshots);
+  transportUI?.refresh();
+}
+
+function initializeModules() {
+  let fallbackStorage;
+  try { fallbackStorage = localStorage; } catch (_) {}
+  const storage = window.SloiExtensionStorage.create({ native: window.AndroidHost, fallback: fallbackStorage });
+  moduleHost = new window.SloiModules.Host({ map, storage, onChange: renderModules,
+    services: { shadows: activateShadowExtension } });
+  window.SloiBundledModules.register(moduleHost);
+  window.SloiLiveTransport?.register(moduleHost);
+  window.SloiMetro?.register(moduleHost);
+  window.SloiBusStops?.register(moduleHost);
+  window.SloiNativeShadows.register(moduleHost);
+  transportPresets = window.SloiTransportPresets.create({ storage,
+    onSelect: async (routes, { isCurrent }) => {
+      const snapshot = await moduleHost.configure("spb-live", { routes: routes === null ? "" : JSON.stringify(routes), route: "" });
+      if (!isCurrent()) return;
+      const result = snapshot.enabled ? snapshot : await moduleHost.enable("spb-live");
+      if (isCurrent() && result.status === "error") throw new Error(result.error || "Не удалось открыть транспорт");
+    },
+  });
+  transportUI = window.SloiTransportUI.install({ map, host: moduleHost, presets: transportPresets, editor: $("transport-presets-editor"),
+    onOpen: () => { closeSheet(false); routingUI?.close(); cancelSearch(); $("transport-open").setAttribute("aria-expanded", "true"); },
+    onClose: () => { $("transport-open").setAttribute("aria-expanded", "false"); },
+    onEditPresets: () => { openSettingsPage("transport-presets"); transportUI.showEditor(); },
+  });
+  let hasSavedStops = false;
+  try { hasSavedStops = Object.hasOwn(JSON.parse(storage.getItem("sloi-modules-state") || "{}").modules || {}, "spb-stops"); } catch (_) {}
+  moduleHost.restore();
+  if (!hasSavedStops) moduleHost.enable("spb-stops");
+}
 let shadowWasEnabled = state.shadows;
 let presets = loadPresets();
 let libraryLoaded = false;
@@ -309,21 +528,6 @@ function attachCustomLayer(entry) {
   layerControls.set(entry.id, controls);
   const actions = document.createElement("div");
   actions.className = "custom-actions";
-  const color = document.createElement("input");
-  color.type = "color";
-  color.value = entry.color;
-  color.setAttribute("aria-label", `Цвет слоя ${entry.name}`);
-  color.addEventListener("change", async () => {
-    color.disabled = true;
-    try {
-      const saved = await layerLibrary.updateColor(entry.id, color.value);
-      customLayers.set(entry.id, { ...record, ...saved });
-      applyMapState();
-    } catch (error) {
-      color.value = customLayers.get(entry.id).color;
-      setImportStatus(error.message, true);
-    } finally { color.disabled = false; }
-  });
   const locate = document.createElement("button");
   locate.type = "button";
   locate.className = "secondary-button";
@@ -342,7 +546,6 @@ function attachCustomLayer(entry) {
   remove.setAttribute("aria-label", `Удалить слой ${entry.name}`);
   remove.addEventListener("click", async () => {
     remove.disabled = true;
-    color.disabled = true;
     try {
       await layerLibrary.remove(entry.id);
       layerRuntime.unregister(entry.id);
@@ -362,15 +565,15 @@ function attachCustomLayer(entry) {
       elements.importButton.focus();
     } catch (error) {
       remove.disabled = false;
-      color.disabled = false;
       setImportStatus(error.message, true);
     }
   });
-  actions.append(color, locate, remove);
+  actions.append(locate, remove);
   controls.card.querySelector(".layer-options").append(actions);
 }
 
 function showCustomPopup(event) {
+  if (routingUI?.isPicking?.()) return;
   const feature = event.features?.[0];
   if (!feature) return;
   const content = document.createElement("div");
@@ -378,10 +581,17 @@ function showCustomPopup(event) {
   const heading = document.createElement("strong");
   heading.textContent = String(feature.properties?.name || "Объект слоя");
   content.append(heading);
-  for (const [key, value] of Object.entries(feature.properties || {}).filter(([key]) => key !== "name").slice(0, 8)) {
-    const row = document.createElement("span");
-    row.textContent = `${key}: ${value}`;
-    content.append(row);
+  if (["vehicle", "metro_station", "metro_entrance", "metro_line", "bus_stop", "stop"].includes(feature.properties?.kind)) {
+    for (const key of ["detail", "statusText"]) {
+      if (!feature.properties[key]) continue;
+      const row = document.createElement("span"); row.textContent = String(feature.properties[key]); content.append(row);
+    }
+  } else {
+    for (const [key, value] of Object.entries(feature.properties || {}).filter(([key]) => key !== "name").slice(0, 8)) {
+      const row = document.createElement("span");
+      row.textContent = `${key}: ${value}`;
+      content.append(row);
+    }
   }
   if (popup) popup.remove();
   popup = new maplibregl.Popup({ offset: 12 }).setLngLat(event.lngLat).setDOMContent(content).addTo(map);
@@ -419,7 +629,7 @@ function saveState() {
 }
 
 function renderPixelRatio() {
-  return Math.min(window.devicePixelRatio || 1, economyMode ? 1 : 1.5);
+  return Math.min(window.devicePixelRatio || 1, economyMode ? 1 : 2);
 }
 
 function viewportBudget() {
@@ -530,20 +740,40 @@ function setPlaceStatus(message, isError = false) {
   elements.placeStatus.classList.toggle("is-error", isError);
 }
 
+function setShadowStatus(message, isError = false) {
+  elements.shadowStatus.textContent = message;
+  elements.shadowStatus.classList.toggle("is-error", isError);
+  const status = moduleCards.get("shadows")?.status;
+  if (status && shadowExtensionActive) {
+    status.textContent = message;
+    status.hidden = !isError && (!message || message === "На карте");
+    status.classList.toggle("is-error", isError);
+  }
+}
+
 function setPlaceBusy(busy) {
   if (busy) stopPlayback();
   elements.placeSubmit.disabled = busy;
   elements.myLocation.disabled = busy;
   elements.loadCenter.disabled = busy;
   elements.locate.disabled = busy;
-  elements.timeRange.disabled = busy;
-  elements.play.disabled = busy;
+  elements.timeRange.disabled = busy || !frames.length;
+  elements.play.disabled = busy || !frames.length;
   elements.retryFrame.disabled = busy;
   elements.sceneRecalculate.disabled = busy;
   elements.sceneDate.disabled = busy;
   elements.sceneTimezone.disabled = busy;
   elements.sceneToday.disabled = busy;
   elements.cancelScene.hidden = !busy;
+  elements.cancelScene.textContent = "Отменить";
+  elements.cancelShadowScene.hidden = !pendingScene;
+}
+
+function cancelPlaceOperation() {
+  if (pendingScene) { cancelSceneLoad(); return; }
+  navigationGeneration++;
+  invalidateLocation();
+  setPlaceStatus("Поиск местоположения отменён.");
 }
 
 function localDateString(date = new Date()) {
@@ -561,13 +791,18 @@ function sceneClock() {
   const time = frames[0]?.time || "";
   const offset = /([+-])(\d{2}):(\d{2})$/.exec(time);
   return {
-    localDate: /^\d{4}-\d{2}-\d{2}T/.test(time) ? time.slice(0, 10) : "",
-    offset: offset ? (offset[1] === "-" ? -1 : 1) * (Number(offset[2]) * 60 + Number(offset[3])) : 0,
+    localDate: /^\d{4}-\d{2}-\d{2}T/.test(time) ? time.slice(0, 10) : localDateString(),
+    offset: offset ? (offset[1] === "-" ? -1 : 1) * (Number(offset[2]) * 60 + Number(offset[3])) : -new Date().getTimezoneOffset(),
   };
 }
 
-function updateSceneClock() {
+function updateSceneClock(preserveInputs = false) {
   const clock = sceneClock();
+  if (preserveInputs && validSceneDate(elements.sceneDate.value)) {
+    clock.localDate = elements.sceneDate.value;
+    const offset = Number(elements.sceneTimezone.value);
+    if (Number.isInteger(offset) && offset >= -720 && offset <= 840) clock.offset = offset;
+  }
   elements.sceneDate.value = clock.localDate;
   const offsets = new Set([clock.offset, 345, 525, 765]);
   for (let offset = -720; offset <= 840; offset += 30) offsets.add(offset);
@@ -612,7 +847,7 @@ function armSceneWatchdog(requestId) {
   }, 90000);
 }
 
-function cancelSceneLoad(message = "Расчёт отменён. Предыдущий район сохранён.") {
+function cancelSceneLoad(message = data ? "Расчёт отменён. Предыдущий район сохранён." : "Расчёт отменён. Карта доступна для просмотра.") {
   if (!pendingScene) return;
   const current = pendingScene;
   pendingScene = null;
@@ -620,8 +855,9 @@ function cancelSceneLoad(message = "Расчёт отменён. Предыду�
   invalidateFrameRequest();
   try { androidHost("cancelScene").cancelScene(current.requestId); } catch (error) { console.warn(error); }
   setPlaceBusy(false);
-  setSelectedLocation(data.region.center[1], data.region.center[0]);
-  setPlaceStatus(message);
+  restoreSelectedLocation();
+  if (current.background) setShadowStatus(message);
+  else setPlaceStatus(message);
   showFrame(state.frame, false);
   current.resolve(null);
 }
@@ -683,7 +919,7 @@ function destinationPoint(center, bearingDegrees, distanceMeters) {
 function setWindGeometry(directionTo) {
   const source = mapReady && map.getSource("wind-vector");
   if (!source) return;
-  if (!windAvailable || !Number.isFinite(directionTo)) {
+  if (!data || !windAvailable || !Number.isFinite(directionTo)) {
     source.setData({ type: "FeatureCollection", features: [] });
     return;
   }
@@ -738,6 +974,10 @@ function updateWind(bundle) {
 }
 
 function updateSunDirection(frame) {
+  if (!frame || !data) {
+    if (mapReady) map.getSource("sun-direction")?.setData({ type: "FeatureCollection", features: [] });
+    return;
+  }
   const azimuth = Number.isFinite(frame.azimuth) ? frame.azimuth : (frame.shadow_bearing + 180) % 360;
   const daylight = frame.altitude > .5 && Number.isFinite(azimuth);
   const sourceLabel = $("sun-source");
@@ -766,6 +1006,130 @@ function setSelectedLocation(latitude, longitude) {
       }],
     });
   }
+}
+
+function restoreSelectedLocation() {
+  if (selectedPlace) setSelectedLocation(selectedPlace.latitude, selectedPlace.longitude);
+  else if (mapReady) map.getSource("selected-location")?.setData({ type: "FeatureCollection", features: [] });
+}
+
+function saveCamera() {
+  if (!mapReady) return;
+  try {
+    window.SloiMapCamera.save(localStorage, map);
+    localStorage.setItem("sloi-pitch-angle", JSON.stringify(pitchController.intent));
+  } catch (_) { /* Optional preference. */ }
+}
+
+function invalidateLocation() {
+  locationGeneration++;
+  if (elements.locate.getAttribute("aria-busy") === "true"
+      && elements.placeStatus.textContent === "Определяю местоположение…") setPlaceStatus("");
+  elements.locate.removeAttribute("aria-busy");
+  if (!pendingScene || pendingScene.background) setPlaceBusy(false);
+}
+
+function clearScene() {
+  selectedPlaceNameRequest?.abort(); selectedPlaceNameRequest = null;
+  navigationGeneration++;
+  searchRequestId++;
+  elements.placeResults.replaceChildren();
+  cancelSceneLoad();
+  invalidateLocation();
+  stopPlayback();
+  invalidateFrameRequest();
+  if (window.AndroidHost && typeof window.AndroidHost.cancelShadowFrame === "function") window.AndroidHost.cancelShadowFrame();
+  activeSceneId = null;
+  data = null;
+  frames = [];
+  retainedFrames.clear();
+  defaultFrame = 0;
+  renderedShadowGeometry = undefined;
+  state.frame = 0;
+  sceneDataStatus = "OpenStreetMap · выберите место или добавьте свой слой";
+  elements.dataStatus.textContent = sceneDataStatus;
+  if (mapReady) {
+    map.getSource("buildings")?.setData({ type: "FeatureCollection", features: [] });
+    map.getSource("shadows")?.setData({ type: "FeatureCollection", features: [] });
+  }
+  if (popup) { popup.remove(); popup = null; }
+  updateSceneClock(true);
+  updateWind(null);
+  showFrame(0);
+  applyMapState();
+}
+
+function selectPlace(latitude, longitude, name = "Выбранное место") {
+  if (!validLonLat([longitude, latitude])) throw new Error("Получены некорректные координаты места");
+  clearScene();
+  selectedPlace = { latitude, longitude, name };
+  if (["Выбранное место", "Точка на карте", "Рядом со мной"].includes(name)) {
+    const place = selectedPlace, controller = new AbortController();
+    selectedPlaceNameRequest = controller;
+    window.SloiPlaceNames.resolve(place, { signal: controller.signal }).then((label) => {
+      if (!label || controller.signal.aborted || selectedPlace !== place) return;
+      place.name = label.name;
+      elements.regionName.textContent = label.name;
+    }).catch(() => {}).finally(() => {
+      if (selectedPlaceNameRequest === controller) selectedPlaceNameRequest = null;
+    });
+  }
+  elements.regionName.textContent = name;
+  elements.recenter.hidden = false;
+  restoreSelectedLocation();
+  map.flyTo({ center: [longitude, latitude], zoom: Math.max(15, map.getZoom()), duration: 650 });
+  setPlaceStatus("");
+  closeSheet();
+}
+
+async function loadDemoScene() {
+  const generation = ++navigationGeneration;
+  searchRequestId++;
+  elements.placeResults.replaceChildren();
+  cancelSceneLoad();
+  invalidateLocation();
+  invalidateFrameRequest();
+  elements.demoButton.disabled = true;
+  $("demo-status").textContent = "Открываю пример теней…";
+  $("demo-status").classList.remove("is-error");
+  setPlaceStatus("Открываю пример теней…");
+  try {
+    if (!fallbackData) {
+      if (!demoPromise) {
+        demoPromise = new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = "map-data.js";
+          script.onload = () => {
+            if (window.SLOI_MAP_DATA?.region && Array.isArray(window.SLOI_MAP_DATA.shadeFrames)) resolve(window.SLOI_MAP_DATA);
+            else { script.remove(); demoPromise = null; reject(new Error("Данные примера повреждены")); }
+          };
+          script.onerror = () => { script.remove(); demoPromise = null; reject(new Error("Не удалось загрузить пример")); };
+          document.head.append(script);
+        });
+      }
+      fallbackData = await demoPromise;
+    }
+    if (generation !== navigationGeneration) return false;
+    const bundle = {
+      schemaVersion: 1, source: "demo", region: fallbackData.region, buildings: fallbackData.buildings,
+      layers: { shadows: { frames: fallbackData.shadeFrames, initialFrameIndex: Math.max(0, fallbackData.shadeFrames.findIndex((frame) => frame.label === "15:00")) } },
+    };
+    if (!validateBundle(bundle)) throw new Error("Данные примера несовместимы с картой");
+    state.mode = "3d";
+    applyBundle(bundle, `Пример · ${fallbackData.region.name}`);
+    $("demo-status").textContent = "Пример открыт.";
+    setPlaceStatus("Открыт пример за 17 июля 2026 года. Это сохранённый расчёт, а не текущие тени.");
+    closeSheet();
+    return true;
+  } catch (error) {
+    if (generation === navigationGeneration) {
+      const message = `Пример недоступен: ${error.message}. Можно повторить попытку.`;
+      $("demo-status").textContent = message;
+      $("demo-status").classList.add("is-error");
+      setPlaceStatus(message, true);
+    }
+    return false;
+  } finally { elements.demoButton.disabled = false; }
 }
 
 function validLonLat(value) {
@@ -816,7 +1180,7 @@ function validateBundle(bundle) {
     && (frame.geometry === null || validShadowGeometry(frame.geometry)));
 }
 
-function applyBundle(bundle, requestedName, keepCamera = false) {
+function applyBundle(bundle, requestedName, keepCamera = false, background = false) {
   const region = bundle && bundle.region;
   const buildings = bundle && bundle.buildings;
   const nextFrames = bundle && bundle.layers && bundle.layers.shadows
@@ -831,7 +1195,7 @@ function applyBundle(bundle, requestedName, keepCamera = false) {
     popup.remove();
     popup = null;
   }
-  activeSceneId = String(bundle.sceneId || region.id || "");
+  activeSceneId = bundle.source === "demo" ? null : String(bundle.sceneId || region.id || "") || null;
   const normalizedFrames = nextFrames.map((frame) => ({
     ...frame,
     computed: typeof frame.computed === "boolean"
@@ -842,73 +1206,122 @@ function applyBundle(bundle, requestedName, keepCamera = false) {
     region: { ...region, name: requestedName || region.name || "Выбранный район" },
     buildings,
     shadeFrames: normalizedFrames,
+    demo: bundle.source === "demo",
   };
   frames = normalizedFrames;
+  retainedFrames.clear();
+  const initialFrame = bundle.layers.shadows.initialFrameIndex;
+  defaultFrame = Number.isInteger(initialFrame) ? Math.max(0, Math.min(frames.length - 1, initialFrame)) : 0;
+  if (!background) selectedPlace = { latitude: region.center[1], longitude: region.center[0], name: data.region.name };
+  restoreSelectedLocation();
   const matchingFrame = previousLabel
     ? frames.findIndex((frame) => frame.label === previousLabel)
     : -1;
-  state.frame = matchingFrame >= 0
+  state.frame = !background && matchingFrame >= 0
     ? matchingFrame
-    : Math.max(0, Number(bundle.layers.shadows.initialFrameIndex) || 0);
+    : defaultFrame;
   elements.timeRange.max = String(frames.length - 1);
-  elements.regionName.textContent = data.region.name;
-  const delivery = String(bundle.source || "").startsWith("city-pack:")
+  if (!background) elements.regionName.textContent = data.region.name;
+  const delivery = bundle.source === "demo" ? "ПРИМЕР · 17.07.2026" : String(bundle.source || "").startsWith("city-pack:")
     ? "ОФЛАЙН-ПАКЕТ"
     : bundle.cacheHit ? "КЭШ" : "ТЕЛЕФОН";
-  elements.dataStatus.textContent = `${buildings.features.length} зданий · тени по запросу · ${delivery}`;
+  elements.dataStatus.textContent = `${buildings.features.length} зданий · ${delivery}`;
   map.getSource("buildings")?.setData(buildings);
   updateSceneClock();
   showFrame(state.frame);
+  retainFrame(state.frame);
   updateWind(bundle);
+  applyMapState();
   if (!keepCamera) fitRegion(true);
   sceneDataStatus = elements.dataStatus.textContent;
   saveState();
 }
 
-async function loadSceneAt(latitude, longitude, name = "Выбранный район", options = {}) {
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
-    || Math.abs(latitude) > 85 || Math.abs(longitude) > 180) {
-    throw new Error("Получены некорректные координаты района");
-  }
+function activateShadowExtension(options, signal) {
+  if (!window.AndroidHost?.requestScene) throw new Error("Тени доступны в Android-приложении");
+  shadowExtensionActive = true;
+  state.shadows = true;
+  state.shadowOpacity = options.opacity;
+  shadowFailedView = null;
+  applyMapState();
+  scheduleShadowViewport();
+  const timer = window.setInterval(scheduleShadowViewport, 60000);
+  return () => {
+    window.clearInterval(timer);
+    window.clearTimeout(shadowRefreshTimer);
+    shadowExtensionActive = false;
+    state.shadows = false;
+    if (pendingScene?.background) cancelSceneLoad();
+    invalidateFrameRequest();
+    window.AndroidHost?.cancelShadowFrame?.();
+    if (mapReady) applyMapState();
+  };
+}
 
-  const localDate = options.localDate || elements.sceneDate.value;
-  const timezoneOffsetMinutes = options.timezoneOffsetMinutes ?? Number(elements.sceneTimezone.value);
+function currentViewportBox() {
+  const bounds = viewportBounds();
+  return bounds && [[bounds.west, bounds.south], [bounds.east, bounds.north]];
+}
+
+function scheduleShadowViewport() {
+  window.clearTimeout(shadowRefreshTimer);
+  if (!shadowExtensionActive || !mapReady || document.hidden || mapTouchActive || map.isMoving()) return;
+  shadowRefreshTimer = window.setTimeout(() => {
+    if (!shadowExtensionActive || document.hidden || mapTouchActive || map.isMoving()) return;
+    const now = new Date();
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+    const clockMatches = sceneClock().localDate === localDateString(now)
+      && Math.abs((frames[state.frame]?.minutes ?? Number(frames[state.frame]?.label?.slice(0, 2)) * 60 + Number(frames[state.frame]?.label?.slice(3))) - currentMinutes) <= 15;
+    const visible = currentViewportBox();
+    if (activeSceneId && clockMatches && window.SloiShadowViewport.contains(data?.region.bounds, visible)) return;
+    if (pendingScene && window.SloiShadowViewport.contains(pendingScene.displayBounds, visible)) return;
+    const key = JSON.stringify(visible);
+    if (shadowFailedView === key) return;
+    let displayBounds;
+    try { displayBounds = window.SloiShadowViewport.plan(visible); }
+    catch (error) { setShadowStatus(error.message); return; }
+    loadViewportScene("Область карты", { displayBounds, background: true })
+      .catch(error => { shadowFailedView = key; setShadowStatus(error.message, true); });
+  }, 550);
+}
+
+async function loadViewportScene(name = "Область карты", options = {}) {
+  const displayBounds = options.displayBounds || window.SloiShadowViewport.plan(currentViewportBox());
+  const background = options.background !== false;
+  const now = new Date();
+  const localDate = options.localDate || localDateString(now);
+  const timezoneOffsetMinutes = options.timezoneOffsetMinutes ?? -now.getTimezoneOffset();
   if (!validSceneDate(localDate) || !Number.isInteger(timezoneOffsetMinutes)
     || timezoneOffsetMinutes < -720 || timezoneOffsetMinutes > 840) {
     throw new Error("Выберите корректные дату и часовой пояс расчёта");
   }
 
+  if (!background) { navigationGeneration++; invalidateLocation(); }
   const requestId = String(++sceneRequestId);
   if (pendingScene) pendingScene.resolve(null);
   window.clearTimeout(sceneWatchdog);
   invalidateFrameRequest();
-  searchRequestId++;
-  setPlaceBusy(true);
-  setPlaceStatus("Телефон загружает OSM и готовит геометрию…");
-  setSelectedLocation(latitude, longitude);
-  const currentFrame = frames[state.frame];
-  const selectedMinutes = currentFrame && /^\d\d:\d\d$/.test(currentFrame.label)
-    ? Number(currentFrame.label.slice(0, 2)) * 60 + Number(currentFrame.label.slice(3))
-    : 15 * 60;
+  if (!background) { searchRequestId++; setPlaceBusy(true); }
+  elements.cancelShadowScene.hidden = false;
+  setShadowStatus("Рассчитываю тени…");
+  const selectedMinutes = options.selectedMinutes ?? now.getHours() * 60 + now.getMinutes();
   const request = {
     requestId,
-    latitude,
-    longitude,
-    radiusM: 450,
+    displayBounds,
     localDate,
     timezoneOffsetMinutes,
     selectedMinutes,
     name,
   };
   return new Promise((resolve, reject) => {
-    pendingScene = { requestId, name, resolve, reject, keepCamera: Boolean(options.keepCamera) };
+    pendingScene = { requestId, name, resolve, reject, keepCamera: true, background, displayBounds };
     try {
       androidHost("requestScene").requestScene(JSON.stringify(request));
       armSceneWatchdog(requestId);
     } catch (error) {
       pendingScene = null;
       setPlaceBusy(false);
-      setPlaceStatus(`Не удалось запустить расчёт: ${error.message}`, true);
+      setShadowStatus(`Не удалось запустить расчёт: ${error.message}`, true);
       showFrame(state.frame, false);
       reject(error);
     }
@@ -922,32 +1335,50 @@ function getCurrentPosition() {
   return new Promise((resolve, reject) => {
     navigator.geolocation.getCurrentPosition(resolve, (error) => {
       const messages = {
-        1: "Нет разрешения на примерное местоположение",
-        2: "Устройство не смогло определить местоположение",
+        1: "Разрешите приложению доступ к местоположению",
+        2: "Не удалось определить местоположение. Проверьте, включена ли геолокация",
         3: "Истекло время определения местоположения",
       };
       reject(new Error(messages[error.code] || error.message || "Ошибка геолокации"));
-    }, { enableHighAccuracy: false, timeout: 15000, maximumAge: 120000 });
+    }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
   });
 }
 
-async function locateAndLoad() {
-  openSheet();
-  setPlaceStatus("Определяю примерное местоположение…");
+async function locateOnMap() {
+  cancelSearch();
+  $("location-settings").hidden = true;
+  navigationGeneration++;
+  searchRequestId++;
+  elements.placeResults.replaceChildren();
+  cancelSceneLoad();
+  const generation = navigationGeneration;
+  const locationRequest = ++locationGeneration;
+  setPlaceStatus("Определяю местоположение…");
+  elements.locate.setAttribute("aria-busy", "true");
   setPlaceBusy(true);
   try {
     const position = await getCurrentPosition();
-    await loadSceneAt(
-      position.coords.latitude,
-      position.coords.longitude,
-      "Рядом со мной",
-    );
+    if (generation !== navigationGeneration) return;
+    selectPlace(position.coords.latitude, position.coords.longitude, "Рядом со мной");
   } catch (error) {
-    if (error?.name !== "AbortError") {
+    if (generation === navigationGeneration && error?.name !== "AbortError") {
+      openSheet("search");
       setPlaceStatus(error.message || "Не удалось определить местоположение", true);
+      if (window.AndroidHost?.getLocationState) {
+        try {
+          const access = JSON.parse(window.AndroidHost.getLocationState());
+          const button = $("location-settings");
+          button.hidden = access.enabled && ["precise", "approximate"].includes(access.permission);
+          button.dataset.locationOff = String(!access.enabled);
+          button.textContent = access.enabled ? "Разрешить доступ в настройках" : "Включить геолокацию";
+        } catch (_) { /* Keep the original location error. */ }
+      }
     }
   } finally {
-    setPlaceBusy(false);
+    if (locationRequest === locationGeneration) {
+      elements.locate.removeAttribute("aria-busy");
+      if (!pendingScene || pendingScene.background) setPlaceBusy(false);
+    }
   }
 }
 
@@ -972,37 +1403,159 @@ function renderPlaces(payload) {
     ? payload
     : payload?.places || payload?.results || payload?.features || [];
   const places = rawItems.map(normalizePlace).filter((place) => place
-    && Number.isFinite(place.latitude) && Number.isFinite(place.longitude));
-  if (!places.length) {
-    setPlaceStatus("Ничего не найдено. Попробуйте уточнить запрос.", true);
-    return;
+    && validLonLat([place.longitude, place.latitude]));
+  renderSearchResults({ query: elements.placeQuery.value.trim(), places, transport: [] });
+}
+
+let searchController = null;
+let searchLoading = false;
+const nativePlaceRequests = new Map();
+const searchErrors = new Map();
+let lastSearchResults = { query: "", places: [], transport: [] };
+
+function searchStatus() {
+  if (searchErrors.size) {
+    elements.placeStatus.textContent = [...searchErrors.values()].join(" · ");
+    elements.placeStatus.classList.add("is-error");
+  } else {
+    const found = lastSearchResults.places.length + lastSearchResults.transport.length;
+    elements.placeStatus.textContent = !found && searchLoading ? "Поиск…"
+      : !found && lastSearchResults.query.length >= 2 ? "Ничего не найдено" : "";
+    elements.placeStatus.classList.remove("is-error");
   }
+}
+
+function renderSearchResults(result) {
+  lastSearchResults = result;
+  const previousKey = document.activeElement?.dataset?.searchResult;
   const fragment = document.createDocumentFragment();
+  const heading = (text) => {
+    const label = document.createElement("div"); label.className = "section-label"; label.textContent = text; fragment.append(label);
+  };
+  const places = result.places.map(normalizePlace).filter((place) => place && validLonLat([place.longitude, place.latitude]));
+  if (places.length) heading("Места");
   for (const place of places) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "place-result";
     button.textContent = place.name;
+    button.dataset.searchResult = `place:${place.latitude},${place.longitude}:${place.name}`;
     button.addEventListener("click", () => {
-      loadSceneAt(place.latitude, place.longitude, place.name).catch(console.warn);
+      cancelSearch();
+      selectPlace(place.latitude, place.longitude, place.name);
     });
     fragment.append(button);
   }
-  elements.placeResults.append(fragment);
-  setPlaceStatus("Выберите место — расчёт пойдёт на телефоне.");
+  if (result.transport.length) heading("Транспорт");
+  for (const route of result.transport) {
+    const button = document.createElement("button"); button.type = "button"; button.className = "place-result";
+    button.dataset.searchResult = `transport:${route.id}`;
+    const number = document.createElement("strong"); number.className = "transport-result-number";
+    number.textContent = route.settings?.route || route.title;
+    const kind = document.createElement("span"); kind.className = "transport-result-type"; kind.textContent = "Автобус";
+    button.append(number, kind);
+    button.setAttribute("aria-label", `Автобус ${route.settings?.route || route.title}`);
+    button.addEventListener("click", async () => {
+      cancelSearch(); button.disabled = true;
+      const generation = ++navigationGeneration;
+      const cameraGeneration = cameraInputGeneration;
+      invalidateLocation();
+      try {
+        if (!moduleHost) throw new Error("Расширения ещё загружаются");
+        const configured = await moduleHost.configure(route.moduleId, route.settings);
+        const loaded = configured.enabled ? configured : await moduleHost.enable(route.moduleId);
+        if (generation !== navigationGeneration || cameraGeneration !== cameraInputGeneration) return;
+        if (loaded.status === "error") throw new Error(loaded.error || "Маршрут недоступен");
+        const bounds = moduleHost.get(route.moduleId).bounds;
+        if (bounds) map.fitBounds(bounds, { padding: 60, maxZoom: 16, duration: 450 });
+        closeSheet();
+        if (route.moduleId === "spb-bus" && moduleHost.entries.has("spb-live")) {
+          // Opening a bus also shows its reported positions. This runs after
+          // displaying the path, so live data cannot delay opening the route.
+          const wasEnabled = moduleHost.get("spb-live").enabled;
+          transportPresets?.clearActive();
+          moduleHost.configure("spb-live", { routes: "", route: String(route.settings.route) }).then((snapshot) => {
+            if (!wasEnabled && generation === navigationGeneration && !snapshot.enabled) return moduleHost.enable("spb-live");
+          }).catch((error) => console.debug("Live transport unavailable", error));
+        }
+      } catch (error) {
+        if (generation !== navigationGeneration || cameraGeneration !== cameraInputGeneration) return;
+        elements.placeStatus.textContent = error.message || "Не удалось открыть маршрут";
+        elements.placeStatus.classList.add("is-error"); button.disabled = false;
+      }
+    });
+    fragment.append(button);
+  }
+  elements.placeResults.replaceChildren(fragment);
+  if (previousKey) [...elements.placeResults.querySelectorAll("button")].find((button) => button.dataset.searchResult === previousKey)?.focus({ preventScroll: true });
+  searchStatus();
 }
 
-function searchPlaces(query) {
-  const requestId = String(++searchRequestId);
-  elements.placeSubmit.disabled = true;
-  elements.placeResults.replaceChildren();
-  setPlaceStatus("Ищу место…");
-  try {
-    androidHost("searchPlaces").searchPlaces(JSON.stringify({ requestId, query, limit: 5 }));
-  } catch (error) {
-    elements.placeSubmit.disabled = false;
-    setPlaceStatus(`Поиск недоступен: ${error.message}`, true);
+function queryPlaceSuggestions(query, { signal }) {
+  const cancelled = () => Object.assign(new Error("Поиск отменён"), { name: "AbortError" });
+  if (signal.aborted) return Promise.reject(cancelled());
+  const center = map?.getCenter();
+  if (!window.AndroidHost || typeof window.AndroidHost.searchPlaces !== "function") {
+    return window.SloiSearch.webPlaces(query, { signal, center: center ? [center.lng, center.lat] : null, zoom: map?.getZoom() });
   }
+  const requestId = String(++searchRequestId);
+  // The native bridge intentionally runs only the latest search. Finish older
+  // JS callers now as well, rather than leaving their promises until 14s later.
+  for (const pending of [...nativePlaceRequests.values()]) pending.finish(cancelled());
+  return new Promise((resolve, reject) => {
+    const finish = (error, value) => {
+      if (!nativePlaceRequests.has(requestId)) return;
+      nativePlaceRequests.delete(requestId); clearTimeout(timer); signal.removeEventListener("abort", abort);
+      if (error) reject(error); else resolve(value);
+    };
+    const cancelOwnedNativeRequest = () => {
+      if (String(searchRequestId) !== requestId) return;
+      searchRequestId++;
+      try { window.AndroidHost.cancelPlaceSearch?.(); } catch (_) {}
+    };
+    const abort = () => {
+      if (!nativePlaceRequests.has(requestId)) return;
+      cancelOwnedNativeRequest();
+      finish(cancelled());
+    };
+    const timer = setTimeout(() => {
+      if (!nativePlaceRequests.has(requestId)) return;
+      cancelOwnedNativeRequest();
+      finish(new Error("Поиск не отвечает. Проверьте соединение."));
+    }, 14000);
+    nativePlaceRequests.set(requestId, { finish }); signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) { abort(); return; }
+    try { window.AndroidHost.searchPlaces(JSON.stringify({ requestId, query, limit: 6, latitude: center?.lat, longitude: center?.lng, zoom: map?.getZoom() })); }
+    catch (error) { finish(error); }
+  });
+}
+
+function placeSearchController() {
+  if (!searchController) searchController = window.SloiSearch.create({
+    places: queryPlaceSuggestions,
+    contextKey: () => {
+      const center = map?.getCenter();
+      return `${offlinePlaceRevision}|${center ? `${center.lng.toFixed(2)},${center.lat.toFixed(2)},${Math.round(map.getZoom())}` : ""}`;
+    },
+    providers: () => window.SloiBundledModules.searchProviders || [],
+    onResults: renderSearchResults,
+    onError(error, provider) {
+      searchErrors.set(provider, provider === "places" ? error.message || "Поиск мест недоступен" : "Транспорт недоступен"); searchStatus();
+    },
+    onLoading(loading) { searchLoading = loading; elements.placeResults.setAttribute("aria-busy", String(loading)); searchStatus(); },
+  });
+  return searchController;
+}
+
+function cancelSearch() {
+  searchController?.cancel();
+  searchRequestId++;
+}
+
+function searchPlaces(query, immediate = true) {
+  searchErrors.clear();
+  const controller = placeSearchController();
+  return immediate ? controller.submit(query) : controller.input(query);
 }
 
 function formatBytes(bytes) {
@@ -1015,16 +1568,33 @@ function formatBytes(bytes) {
 
 function cityPackPhase(record) {
   const phases = {
+    "import-select": "Выберите ZIP или GeoPackage…",
+    "import-copy": `Копирую пакет: ${formatBytes(record.current)}`,
+    "import-check": "Проверяю данные…",
     metadata: "Проверяю размер…",
     download: `Загружено ${formatBytes(record.current)} из ${formatBytes(record.total)}`,
     extract: "Распаковываю пакет…",
-    index: "Строю индекс зданий на телефоне…",
+    index: "Готовлю данные города…",
     ready: "Пакет установлен",
   };
   return phases[record.phase] || "Подготавливаю офлайн-пакет…";
 }
 
+function renderOfflinePlacesState() {
+  const status = $("offline-place-status"), retry = $("offline-place-retry");
+  if (!offlinePlaceState) { status.hidden = true; retry.hidden = true; return; }
+  const state = offlinePlaceState;
+  const message = state.phase === "error" ? `Поиск на устройстве: ${state.error || "не удалось подготовить данные"}`
+    : state.phase === "indexing" ? `Готовлю поиск на устройстве${Number(state.total) > 0 ? ` · ${Math.min(100, Math.floor(Number(state.current) / Number(state.total) * 100))}%` : "…"}`
+      : Number(state.rows) > 0 ? `Поиск на устройстве · ${Number(state.rows).toLocaleString("ru-RU")} объектов`
+        : "Адреса и места будут доступны после установки данных города.";
+  status.hidden = false;
+  if (status.textContent !== message) status.textContent = message;
+  retry.hidden = state.phase !== "error";
+}
+
 function renderCityPacks() {
+  cityPackControls.clear();
   elements.cityPackList.replaceChildren();
   if (!cityPacks.size) {
     const empty = document.createElement("div");
@@ -1036,6 +1606,7 @@ function renderCityPacks() {
   for (const record of cityPacks.values()) {
     const card = document.createElement("div");
     card.className = "city-pack";
+    card.dataset.status = record.status;
     const copy = document.createElement("div");
     copy.className = "city-pack-copy";
     const title = document.createElement("strong");
@@ -1046,14 +1617,14 @@ function renderCityPacks() {
     const downloadSize = formatBytes(record.downloadBytes || record.total);
     const diskSize = formatBytes(record.installedBytes);
     const updatedAt = record.updatedAt || record.date;
-    const attribution = record.source && record.license ? " · BBBike / ODbL" : "";
+    const attribution = record.source && record.license ? record.imported ? " · OSM / ODbL" : " · BBBike / ODbL" : "";
     detail.textContent = downloading
-      ? `Здания и высоты · ${cityPackPhase(record)}`
+      ? cityPackPhase(record)
       : installed
-        ? `Здания и высоты · на устройстве · ${diskSize}${updatedAt ? ` · ${updatedAt}` : ""}${attribution}`
+        ? `Адреса, места и здания · на устройстве · ${diskSize}${updatedAt ? ` · ${updatedAt}` : ""}${attribution}`
         : record.status === "error"
           ? `Ошибка: ${record.error || "загрузка прервана"}`
-          : `Здания и высоты · скачать ${downloadSize}${record.expectedInstalledBytes || record.installedEstimateBytes || record.installedBytes ? ` · на диске ≈ ${formatBytes(record.expectedInstalledBytes || record.installedEstimateBytes || record.installedBytes)}` : ""}${attribution}`;
+          : `Адреса, места и здания · скачать ${downloadSize}${record.expectedInstalledBytes || record.installedEstimateBytes || record.installedBytes ? ` · на диске ≈ ${formatBytes(record.expectedInstalledBytes || record.installedEstimateBytes || record.installedBytes)}` : ""}${attribution}`;
     copy.append(title, detail);
 
     const button = document.createElement("button");
@@ -1082,14 +1653,28 @@ function renderCityPacks() {
         androidHost("downloadCityPack").downloadCityPack(record.id);
       });
     }
-    card.append(copy, button);
+    const actions = document.createElement("div"); actions.className = "city-pack-actions";
+    actions.append(button);
+    if (typeof window.AndroidHost?.importCityPack === "function") {
+      const importButton = document.createElement("button"); importButton.type = "button"; importButton.className = "is-import";
+      importButton.textContent = "Из файла"; importButton.disabled = downloading || record.status === "deleting";
+      importButton.setAttribute("aria-label", `Импортировать пакет ${record.name || record.id}`);
+      importButton.addEventListener("click", () => {
+        record.status = "downloading"; record.phase = "import-select"; record.current = 0; record.total = 0; renderCityPacks();
+        try { window.AndroidHost.importCityPack(record.id); }
+        catch (error) { window.SloiApp.onCityPackError(record.id, error.message); }
+      }); actions.append(importButton);
+    }
+    card.append(copy, actions);
+    let progress = null;
     if (downloading) {
-      const progress = document.createElement("progress");
+      progress = document.createElement("progress");
       progress.max = Math.max(1, Number(record.total) || 1);
       progress.value = Math.max(0, Number(record.current) || 0);
       if (!(Number(record.total) > 0)) progress.removeAttribute("value");
       card.append(progress);
     }
+    cityPackControls.set(String(record.id), { card, button, detail, progress });
     elements.cityPackList.append(card);
   }
 }
@@ -1099,13 +1684,40 @@ function requestCityPacks() {
     androidHost("listCityPacks").listCityPacks();
   } catch (error) {
     console.debug("City packs unavailable", error);
+    elements.cityPackList.innerHTML = '<p class="control-note">Пакеты городов доступны в Android-приложении.</p>';
   }
 }
 
-const viewportMinZoom = 14.25;
+const buildingDetail = Object.freeze({ fullScaleMeters: 100, flatScaleMeters: 250 });
 const viewportMaxTiles = 96;
 // Keep dynamic buildings below the controls/markers added after the scene buildings.
 const viewportInsertBeforeLayer = "wind-line";
+
+function buildings3dVisible() {
+  return mapReady && state.mode === "3d"
+    && window.SloiMapCamera.scaleMeters(map.getCenter().lat, map.getZoom()) < buildingDetail.flatScaleMeters;
+}
+
+function updateBuildingVisibility() {
+  if (!mapReady) return;
+  const near = window.SloiMapCamera.scaleMeters(map.getCenter().lat, map.getZoom()) < buildingDetail.flatScaleMeters;
+  const volume = state.buildings && state.mode === "3d" && near;
+  const flat = state.buildings && state.mode === "2d" && near;
+  const fromViewport = hasViewportBuildings();
+  const pairs = [{ flat: "buildings-flat", extrusion: "buildings-3d", scene: true },
+    ...[...viewport.loaded.keys()].map(viewportLayerIds).filter(Boolean)];
+  for (const ids of pairs) {
+    for (const [id, visible] of [[ids.flat, flat && (!ids.scene || !fromViewport)],
+      [ids.extrusion, volume && (!ids.scene || !fromViewport)]]) {
+      const visibility = visible ? "visible" : "none";
+      if (map.getLayer(id) && map.getLayoutProperty(id, "visibility") !== visibility) map.setLayoutProperty(id, "visibility", visibility);
+    }
+  }
+  if (!volume && viewport.requestId) {
+    cancelViewportRequest();
+    viewport.signature = null;
+  }
+}
 
 function cityPackBounds(record) {
   const bounds = record?.bounds;
@@ -1145,9 +1757,9 @@ function boundsIntersect(a, b) {
 }
 
 function viewportTileZoom(zoom) {
-  if (zoom < 16) return 15;
-  if (zoom < 17) return 16;
-  return 17;
+  // Building geometry is identical at these levels. A fixed grid keeps the
+  // same sources alive through zoom instead of deleting and reloading a city.
+  return 15;
 }
 
 function canonicalTileX(x, z) {
@@ -1277,10 +1889,8 @@ function discardViewportTiles(cancel = false) {
 }
 
 function hasViewportBuildings() {
-  for (const tileId of viewport.loaded.keys()) {
-    if (viewport.desired.has(tileId)) return true;
-  }
-  return false;
+  return viewport.loaded.size > 0 || Boolean(activeInstalledPack() && mapReady
+    && buildings3dVisible() && boundsIntersect(viewportBounds(), activeInstalledPack().bounds));
 }
 
 function updateViewportStatus() {
@@ -1299,7 +1909,7 @@ function updateViewportStatus() {
 function disableViewportForCurrentSignature(message) {
   viewport.error = message;
   viewport.blockedSignature = viewport.signature;
-  discardViewportTiles(true);
+  cancelViewportRequest();
   applyMapState();
   updateViewportStatus();
 }
@@ -1349,7 +1959,7 @@ function addViewportTile(tileId, payload) {
     id: ids.flat,
     type: "fill",
     source: ids.source,
-    paint: { "fill-color": neutralBuildingColor, "fill-opacity": .8, "fill-outline-color": "#8b928c" },
+    paint: { "fill-color": neutralBuildingColor, "fill-opacity": state.buildingOpacity, "fill-outline-color": "#8b928c" },
   }, viewportInsertBeforeLayer);
   map.addLayer({
     id: ids.extrusion,
@@ -1359,7 +1969,7 @@ function addViewportTile(tileId, payload) {
       "fill-extrusion-color": neutralBuildingColor,
       "fill-extrusion-height": ["get", "height"],
       "fill-extrusion-base": ["get", "min_height"],
-      "fill-extrusion-opacity": .9,
+      "fill-extrusion-opacity": state.buildingOpacity,
       "fill-extrusion-vertical-gradient": true,
     },
   }, viewportInsertBeforeLayer);
@@ -1373,17 +1983,25 @@ function addViewportTile(tileId, payload) {
 }
 
 function refreshViewportTiles() {
-  if (!mapReady || document.hidden) return;
+  if (!mapReady || document.hidden || mapTouchActive || map.isMoving()) return;
   const pack = activeInstalledPack();
   const bounds = viewportBounds();
   const zoom = map.getZoom();
-  if (!pack || !bounds || !state.buildings || zoom < viewportMinZoom || !boundsIntersect(bounds, pack.bounds)) {
+  if (!pack || !bounds || !state.buildings || !boundsIntersect(bounds, pack.bounds)) {
     if (viewport.requestId || viewport.loaded.size) {
       discardViewportTiles(true);
       viewport.signature = null;
       viewport.blockedSignature = null;
       applyMapState();
     }
+    return;
+  }
+  if (!buildings3dVisible()) {
+    cancelViewportRequest();
+    viewport.signature = null;
+    // Stop native work and drawing, retaining only the bounded ready cache so
+    // returning to street detail does not delete/recreate unchanged sources.
+    applyMapState();
     return;
   }
   const z = viewportTileZoom(zoom);
@@ -1411,7 +2029,7 @@ function refreshViewportTiles() {
   } else {
     cancelViewportRequest();
     for (const tileId of viewport.loaded.keys()) {
-      if (!desired.has(tileId)) {
+      if (!desired.has(tileId) && !boundsIntersect(parseViewportTileId(tileId)?.bounds, bounds)) {
         removeViewportTile(tileId);
         viewport.loaded.delete(tileId);
       }
@@ -1449,6 +2067,7 @@ function refreshViewportTiles() {
 
 function scheduleViewportTiles() {
   window.clearTimeout(viewport.timer);
+  if (mapTouchActive || !mapReady || map.isMoving()) return;
   viewport.timer = window.setTimeout(refreshViewportTiles, 180);
 }
 
@@ -1461,6 +2080,29 @@ async function readViewportJson(url) {
 }
 
 Object.assign(window.SloiApp, {
+  onOfflinePlacesState(payload) {
+    try {
+      const state = typeof payload === "string" ? JSON.parse(payload) : payload;
+      if (!state || typeof state !== "object") return;
+      const revision = String(state.revision || state.signature || "");
+      const changed = revision !== offlinePlaceRevision;
+      offlinePlaceState = state; offlinePlaceRevision = revision;
+      window.SloiOfflinePlacesRevision = revision;
+      renderOfflinePlacesState();
+      if (changed) {
+        cancelSearch();
+        searchController?.dispose(); searchController = null;
+        renderSearchResults({ query: "", places: [], transport: [] });
+        searchErrors.clear();
+        searchNeedsRefresh = elements.placeQuery.value.trim().length >= 2;
+        routingUI?.invalidateSearchData?.();
+        if (activePanel === "search" && elements.sheet.classList.contains("is-open") && searchNeedsRefresh) {
+          searchNeedsRefresh = false;
+          searchPlaces(elements.placeQuery.value, true);
+        }
+      }
+    } catch (error) { console.warn("Invalid offline search state", error); }
+  },
   onSceneProgress(requestId, stage, current, total) {
     if (!pendingScene || String(requestId) !== pendingScene.requestId) return;
     armSceneWatchdog(String(requestId));
@@ -1481,7 +2123,7 @@ Object.assign(window.SloiApp, {
       : !byteProgress && Number(total) > 0
         ? ` · ${Number(current)}/${Number(total)}`
         : "";
-    setPlaceStatus(fallback + progress);
+    setShadowStatus(fallback + progress);
   },
   async onSceneReady(requestId, url) {
     if (!pendingScene || String(requestId) !== pendingScene.requestId) return;
@@ -1489,22 +2131,18 @@ Object.assign(window.SloiApp, {
     try {
       const bundle = await readGeneratedJson(url);
       if (!pendingScene || pendingScene.requestId !== current.requestId) return;
-      applyBundle(bundle, current.name, current.keepCamera);
+      applyBundle(bundle, current.name, current.keepCamera, current.background);
       if (window.AndroidHost && typeof window.AndroidHost.acceptScene === "function") {
         window.AndroidHost.acceptScene(activeSceneId);
       }
       const cityPack = String(bundle.source || "").startsWith("city-pack:");
-      setPlaceStatus(cityPack
-        ? `Готово: ${data.region.name}. Здания взяты из офлайн-пакета, высоты и тени рассчитаны на телефоне.`
-        : bundle.cacheHit
-          ? `Готово: ${data.region.name}. Сырые данные взяты из кэша телефона.`
-          : `Готово: ${data.region.name}. Здания и тень рассчитаны на телефоне.`);
-      elements.placeResults.replaceChildren();
-      closeSheet();
+      setShadowStatus(frames[state.frame]?.altitude <= .5 ? "Сейчас ночь — теней нет" : "На карте");
+      if (!current.background) { elements.placeResults.replaceChildren(); closeSheet(); }
       current.resolve(bundle);
     } catch (error) {
       if (!pendingScene || pendingScene.requestId !== current.requestId) return;
-      setPlaceStatus(`Не удалось открыть результат: ${error.message}. Оставлен предыдущий район.`, true);
+      setShadowStatus(`Не удалось открыть результат: ${error.message}`, true);
+      restoreSelectedLocation();
       current.reject(error);
     } finally {
       if (pendingScene && pendingScene.requestId === current.requestId) {
@@ -1522,22 +2160,28 @@ Object.assign(window.SloiApp, {
     window.clearTimeout(sceneWatchdog);
     setPlaceBusy(false);
     const error = new Error(String(message || "Ошибка локального расчёта"));
-    setPlaceStatus(`Не удалось рассчитать район: ${error.message}. Оставлен предыдущий.`, true);
-    setSelectedLocation(data.region.center[1], data.region.center[0]);
+    setShadowStatus(`Не удалось рассчитать тени: ${error.message}`, true);
+    restoreSelectedLocation();
     showFrame(state.frame, false);
     current.reject(error);
   },
   onPlacesReady(requestId, payloadText) {
-    if (String(requestId) !== String(searchRequestId)) return;
-    elements.placeSubmit.disabled = false;
     try {
       const payload = typeof payloadText === "string" ? JSON.parse(payloadText) : payloadText;
+      const pending = nativePlaceRequests.get(String(requestId));
+      if (pending) { pending.finish(null, Array.isArray(payload) ? payload : payload?.places || payload?.results || []); return; }
+      if (String(requestId) !== String(searchRequestId)) return;
+      elements.placeSubmit.disabled = false;
       renderPlaces(payload);
     } catch (error) {
-      setPlaceStatus(`Поиск вернул повреждённые данные: ${error.message}`, true);
+      const pending = nativePlaceRequests.get(String(requestId));
+      if (pending) pending.finish(new Error("Поиск вернул повреждённые данные"));
+      else if (String(requestId) === String(searchRequestId)) setPlaceStatus(`Поиск вернул повреждённые данные: ${error.message}`, true);
     }
   },
   onPlacesError(requestId, message) {
+    const pending = nativePlaceRequests.get(String(requestId));
+    if (pending) { pending.finish(new Error(String(message || "Поиск недоступен"))); return; }
     if (String(requestId) !== String(searchRequestId)) return;
     elements.placeSubmit.disabled = false;
     setPlaceStatus(`Поиск недоступен: ${String(message || "ошибка сети")}`, true);
@@ -1563,6 +2207,7 @@ Object.assign(window.SloiApp, {
         viewport.packRevision = null;
       }
       renderCityPacks();
+      applyMapState();
       scheduleViewportTiles();
     } catch (error) {
       console.warn("Invalid city pack catalog", error);
@@ -1575,12 +2220,19 @@ Object.assign(window.SloiApp, {
     record.phase = String(phase);
     record.current = Number(current) || 0;
     record.total = Number(total) || 0;
-    if (record.total > 0) record.downloadBytes = record.total;
-    renderCityPacks();
+    if (record.phase === "download" && record.total > 0) record.downloadBytes = record.total;
+    let controls = cityPackControls.get(String(id));
+    if (!controls?.progress || controls.card.dataset.status !== "downloading") {
+      renderCityPacks();
+      controls = cityPackControls.get(String(id));
+    }
+    controls.detail.textContent = cityPackPhase(record);
+    controls.progress.max = Math.max(1, record.total);
+    if (record.total > 0) controls.progress.value = Math.max(0, record.current);
+    else controls.progress.removeAttribute("value");
   },
   onCityPackChanged(payloadText) {
     window.SloiApp.onCityPacks(payloadText);
-    setPlaceStatus("Офлайн-пакеты обновлены.");
   },
   onCityPackError(id, message) {
     const record = cityPacks.get(String(id));
@@ -1589,7 +2241,7 @@ Object.assign(window.SloiApp, {
       record.error = String(message || "ошибка загрузки");
       renderCityPacks();
     }
-    setPlaceStatus(`Пакет города не установлен: ${String(message || "ошибка")}`, true);
+    if (!record) elements.cityPackList.textContent = `Пакеты недоступны: ${String(message || "ошибка")}`;
   },
   async onViewportTileReady(requestId, tileId, url) {
     if (String(requestId) !== viewport.requestId) return;
@@ -1653,6 +2305,7 @@ Object.assign(window.SloiApp, {
         throw new Error("Некорректный кадр тени");
       }
       frames[safeIndex] = { ...frames[safeIndex], ...frame, computed: true };
+      retainFrame(safeIndex);
       window.clearTimeout(frameWatchdog);
       if (state.frame === safeIndex) {
         showFrame(safeIndex, false);
@@ -1693,7 +2346,7 @@ function shadowCollection(geometry) {
   };
 }
 
-const neutralBuildingColor = "#d9d8cf";
+const neutralBuildingColor = "#c7cdd0";
 const confidenceColor = [
   "match",
   ["get", "height_source"],
@@ -1709,6 +2362,46 @@ function setLayerVisibility(id, visible) {
   }
 }
 
+function layerAvailable(layer) {
+  if (layer.id === "wind") return windAvailable;
+  if (layer.id === "shadows" || layer.id === "sun") return frames.length > 0;
+  if (layer.id === "buildings") return Boolean(data) || Boolean(activeInstalledPack()) || hasViewportBuildings();
+  return true;
+}
+
+function retainFrame(index) {
+  if (!activeSceneId || !frames[index]?.geometry) return;
+  retainedFrames.delete(index);
+  retainedFrames.set(index, JSON.stringify(frames[index].geometry).length * 2);
+  let bytes = [...retainedFrames.values()].reduce((sum, value) => sum + value, 0);
+  for (const [old, size] of retainedFrames) {
+    if (retainedFrames.size <= 3 && bytes <= 4 * 1024 * 1024) break;
+    if (old === index) continue; // The displayed frame is the irreducible working set.
+    frames[old] = { ...frames[old], geometry: null, computed: false };
+    retainedFrames.delete(old);
+    bytes -= size;
+  }
+}
+
+function shadowWorkAllowed() {
+  return mapReady && Boolean(data) && !document.hidden && !map.isMoving() && !mapTouchActive
+    && boundsIntersect(viewportBounds(), { west: data.region.bounds[0][0], south: data.region.bounds[0][1], east: data.region.bounds[1][0], north: data.region.bounds[1][1] });
+}
+
+function updateMapDetail() {
+  if (!mapReady) return;
+  const meters = window.SloiMapCamera.scaleMeters(map.getCenter().lat, map.getZoom());
+  $("map-scale-label").textContent = meters >= 1000 ? `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)} км` : `${Math.round(meters)} м`;
+  const latitude = map.getCenter().lat;
+  const flatZoom = Math.log2(window.SloiMapCamera.scaleMeters(latitude, 0) / buildingDetail.flatScaleMeters);
+  const fullZoom = Math.log2(window.SloiMapCamera.scaleMeters(latitude, 0) / buildingDetail.fullScaleMeters);
+  for (const id of ["buildings-3d", ...[...viewport.loaded.keys()].map((tile) => viewportLayerIds(tile)?.extrusion).filter(Boolean)]) {
+    setPaintIfChanged(id, "fill-extrusion-height", ["interpolate", ["linear"], ["zoom"], flatZoom, 0, fullZoom, ["get", "height"]]);
+    setPaintIfChanged(id, "fill-extrusion-base", ["interpolate", ["linear"], ["zoom"], flatZoom, 0, fullZoom, ["get", "min_height"]]);
+  }
+  updateBuildingVisibility();
+}
+
 function applyControls() {
   const focused = document.activeElement;
   elements.mode2d.setAttribute("aria-pressed", String(state.mode === "2d"));
@@ -1716,13 +2409,17 @@ function applyControls() {
   elements.baseLight.setAttribute("aria-pressed", String(state.basemap === "light"));
   elements.baseDark.setAttribute("aria-pressed", String(state.basemap === "dark"));
   elements.confidenceToggle.checked = state.confidence;
-  elements.confidenceToggle.disabled = !state.buildings;
-  elements.heightLegend.hidden = !state.confidence || !state.buildings;
-  let activeCount = 0;
+  const buildingsAvailable = layerAvailable({ id: "buildings" });
+  elements.confidenceToggle.disabled = !state.buildings || !buildingsAvailable;
+  elements.heightLegend.hidden = !state.confidence || !state.buildings || !buildingsAvailable;
+  elements.timeCard.hidden = shadowExtensionActive || !frames.length;
+  elements.recenter.hidden = !selectedPlace;
+  $("clear-scene").hidden = true;
+  document.body.classList.toggle("has-scene", !elements.timeCard.hidden);
   const order = currentLayerOrder();
   for (const layer of allLayers()) {
     const controls = layerControls.get(layer.id);
-    const available = layer.id !== "wind" || windAvailable;
+    const available = layerAvailable(layer);
     const settings = settingsForLayer(layer);
     const opacity = Math.round(settings.opacity * 100);
     controls.toggle.checked = settings.enabled;
@@ -1733,7 +2430,6 @@ function applyControls() {
     const position = order.indexOf(layer.id);
     controls.up.disabled = position === order.length - 1;
     controls.down.disabled = position === 0;
-    if (available && settings.enabled) activeCount++;
   }
   const displayOrder = [...order].reverse();
   const currentOrder = [...elements.layerList.children].map((card) => card.dataset.layer);
@@ -1746,7 +2442,13 @@ function applyControls() {
       target?.focus({ preventScroll: true });
     }
   }
-  elements.activeCount.textContent = String(activeCount);
+  updateActiveCount();
+}
+
+function updateActiveCount(modules = moduleHost?.list() || []) {
+  const layers = allLayers().filter((layer) => !["shadows", "wind", "sun"].includes(layer.id)
+    && layerAvailable(layer) && settingsForLayer(layer).enabled).length;
+  elements.activeCount.textContent = String(layers + modules.filter((module) => module.enabled && module.status === "ready").length);
 }
 
 function moveLayerGroup(id, direction) {
@@ -1764,8 +2466,11 @@ function initializeLayerRuntime() {
   for (const layer of layerSettings.registry) {
     layerRuntime.register({
       ...layer, sourceLabel: layer.source,
-      available: () => layer.id !== "wind" || windAvailable,
-      getSettings: () => settingsForLayer(layer),
+      available: () => layerAvailable(layer),
+      getSettings: () => {
+        const settings = settingsForLayer(layer);
+        return layer.id === "shadows" ? { ...settings, enabled: settings.enabled && Boolean(data) } : settings;
+      },
       mapLayers: () => {
         if (layer.id === "shadows") return [{ id: "ground-shadows", opacityProperty: "fill-opacity" }];
         if (layer.id === "wind") return [
@@ -1777,14 +2482,14 @@ function initializeLayerRuntime() {
           { id: "sun-head", opacityProperty: "circle-opacity", extraOpacityProperties: ["circle-stroke-opacity"] },
         ];
         const bindings = [
-          { id: "buildings-flat", opacityProperty: "fill-opacity", visible: () => !hasViewportBuildings() && state.mode === "2d" },
-          { id: "buildings-3d", opacityProperty: "fill-extrusion-opacity", visible: () => !hasViewportBuildings() && state.mode === "3d" },
+          { id: "buildings-flat", opacityProperty: "fill-opacity", visible: () => !hasViewportBuildings() && state.mode === "2d" && window.SloiMapCamera.scaleMeters(map.getCenter().lat, map.getZoom()) < buildingDetail.flatScaleMeters },
+          { id: "buildings-3d", opacityProperty: "fill-extrusion-opacity", visible: () => !hasViewportBuildings() && buildings3dVisible() },
         ];
         for (const tileId of viewport.loaded.keys()) {
           const ids = viewportLayerIds(tileId);
           if (ids) bindings.push(
-            { id: ids.flat, opacityProperty: "fill-opacity", visible: () => state.mode === "2d" },
-            { id: ids.extrusion, opacityProperty: "fill-extrusion-opacity", visible: () => state.mode === "3d" },
+            { id: ids.flat, opacityProperty: "fill-opacity", visible: () => state.mode === "2d" && window.SloiMapCamera.scaleMeters(map.getCenter().lat, map.getZoom()) < buildingDetail.flatScaleMeters },
+            { id: ids.extrusion, opacityProperty: "fill-extrusion-opacity", visible: buildings3dVisible },
           );
         }
         return bindings;
@@ -1794,6 +2499,8 @@ function initializeLayerRuntime() {
 }
 
 function applyMapState() {
+  state.wind = false;
+  state.sun = false;
   if (styleFrame !== null) { window.cancelAnimationFrame(styleFrame); styleFrame = null; }
   if (shadowWasEnabled !== state.shadows) {
     shadowWasEnabled = state.shadows;
@@ -1804,35 +2511,40 @@ function applyMapState() {
   applyControls();
   saveState();
   if (!mapReady) return;
-  setLayerVisibility("base-light", state.basemap === "light");
-  setLayerVisibility("base-dark", state.basemap === "dark");
+  if (!state.shadows && renderedShadowGeometry !== undefined) {
+    map.getSource("shadows")?.setData({ type: "FeatureCollection", features: [] });
+    renderedShadowGeometry = undefined;
+  }
+  window.SloiBasemap.applyTheme(map, state.basemap);
   setPaintIfChanged("ground-shadows", "fill-color", state.basemap === "dark" ? "#09110e" : "#17231f");
-  const buildingColor = state.confidence ? confidenceColor : neutralBuildingColor;
+  const buildingColor = state.confidence ? confidenceColor : state.basemap === "dark" ? "#39434b" : neutralBuildingColor;
   const pairs = [{ flat: "buildings-flat", extrusion: "buildings-3d" },
     ...[...viewport.loaded.keys()].map(viewportLayerIds).filter(Boolean)];
   for (const ids of pairs) {
     setPaintIfChanged(ids.flat, "fill-color", buildingColor);
     setPaintIfChanged(ids.extrusion, "fill-extrusion-color", buildingColor);
   }
-  layerRuntime.apply(state, currentLayerOrder());
+  layerRuntime.apply(state, currentLayerOrder(), { anchor: "module-anchor" });
+  updateMapDetail();
 }
 
 function applyCameraMode(animate) {
   if (!mapReady) return;
+  pitchController.select(state.mode === "3d" ? (pitchController.intent || 56) : 0);
   const camera = state.mode === "3d"
-    ? { pitch: 56, bearing: -22 }
-    : { pitch: 0, bearing: 0 };
-  map.easeTo({ ...camera, duration: animate ? 550 : 0 });
+    ? { pitch: pitchController.intent }
+    : { pitch: 0 };
+  map.easeTo({ ...camera, duration: animate && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 450 : 0 });
 }
 
 function requestFrame(index) {
-  if (!activeSceneId || pendingScene || !state.shadows || document.hidden) return;
+  if (!activeSceneId || pendingScene || !state.shadows || !shadowWorkAllowed()) return;
   window.clearTimeout(frameDebounceTimer);
   window.clearTimeout(frameWatchdog);
   const requestId = String(++frameRequestId);
   const sceneId = activeSceneId;
   frameDebounceTimer = window.setTimeout(() => {
-    if (pendingScene || !state.shadows || document.hidden || activeSceneId !== sceneId || String(frameRequestId) !== requestId
+    if (pendingScene || !state.shadows || !shadowWorkAllowed() || activeSceneId !== sceneId || String(frameRequestId) !== requestId
       || state.frame !== index || frames[index]?.computed) return;
     try {
       setPlaceStatus(`Считаю тень ${frames[index].label} на телефоне…`);
@@ -1854,9 +2566,24 @@ function requestFrame(index) {
 }
 
 function showFrame(index, persist = true) {
+  if (!frames.length) {
+    state.frame = 0;
+    elements.timeRange.value = "0";
+    elements.timeRange.max = "0";
+    elements.timeRange.disabled = true;
+    elements.play.disabled = true;
+    elements.timeCard.hidden = true;
+    elements.retryFrame.hidden = true;
+    updateSunDirection(null);
+    if (persist) saveState();
+    return;
+  }
   const value = Number(index);
   const safeIndex = Number.isInteger(value) ? Math.max(0, Math.min(frames.length - 1, value)) : 0;
   const frame = frames[safeIndex];
+  elements.timeCard.hidden = shadowExtensionActive;
+  elements.timeRange.disabled = Boolean(pendingScene);
+  elements.play.disabled = Boolean(pendingScene);
   state.frame = safeIndex;
   elements.retryFrame.hidden = true;
   elements.timeRange.value = String(safeIndex);
@@ -1868,15 +2595,16 @@ function showFrame(index, persist = true) {
   elements.daylightPill.classList.toggle("is-night", frame.altitude <= .5);
   const needsComputation = frame.altitude > .5 && frame.geometry === null
     && frame.computed === false;
-  if (mapReady && state.shadows && renderedShadowGeometry !== frame.geometry) {
+  if (mapReady && state.shadows && shadowWorkAllowed() && renderedShadowGeometry !== frame.geometry) {
     const source = map.getSource("shadows");
     if (source) { source.setData(shadowCollection(frame.geometry)); renderedShadowGeometry = frame.geometry; }
   }
   updateSunDirection(frame);
-  if (needsComputation && state.shadows) {
+  if (needsComputation && state.shadows && shadowWorkAllowed()) {
     elements.sunValue.textContent = `Солнце ${Math.round(frame.altitude)}° · считаю тень…`;
     requestFrame(safeIndex);
   }
+  if (state.shadows && mapReady && !shadowWorkAllowed()) elements.sunValue.textContent = "Приблизьте выбранный район для теней";
   if (persist) saveState();
 }
 
@@ -1889,6 +2617,8 @@ function stopPlayback() {
 }
 
 function startPlayback() {
+  if (!frames.length) return;
+  if (state.shadows && !shadowWorkAllowed()) return;
   if (playbackTimer !== null) {
     stopPlayback();
     return;
@@ -1907,7 +2637,83 @@ function startPlayback() {
   }, 900);
 }
 
-function openSheet() {
+function switchPanel(panel) {
+  if (["offline", "settings", "module-settings", "transport-presets"].includes(panel)) { openSettingsPage(panel); return; }
+  if (!["search", "layers"].includes(panel)) panel = "layers";
+  activePanel = panel;
+  for (const node of elements.sheet.querySelectorAll(".sheet-panel")) node.hidden = node.id !== `panel-${panel}`;
+  for (const button of document.querySelectorAll(".sheet-tabs button")) button.setAttribute("aria-pressed", String(button.dataset.panel === panel));
+  $("layers-title").textContent = panel === "search" ? "Найти место" : "Мои слои";
+  $("nav-map").setAttribute("aria-pressed", String(panel === "search"));
+  elements.layersButton.setAttribute("aria-pressed", String(panel === "layers"));
+  elements.sheet.scrollTop = 0;
+  if (panel === "search" && searchNeedsRefresh) {
+    searchNeedsRefresh = false;
+    searchPlaces(elements.placeQuery.value, true);
+  }
+}
+
+function showSettingsPanel(panel, focus = true) {
+  if (!["settings", "offline", "module-settings", "transport-presets"].includes(panel)) panel = "settings";
+  const previous = activeSettingsPanel;
+  activeSettingsPanel = panel;
+  for (const node of $("settings-page").querySelectorAll(".settings-panel")) node.hidden = node.id !== `panel-${panel}`;
+  $("settings-title").textContent = { settings: "Настройки", offline: "Офлайн-карты", "module-settings": "Настройки расширений", "transport-presets": "Наборы транспорта" }[panel];
+  $("settings-back").setAttribute("aria-label", panel === "settings" ? "Вернуться к карте" : "Назад в настройки");
+  $("nav-offline").setAttribute("aria-pressed", String(panel === "offline"));
+  $("nav-module-settings").setAttribute("aria-pressed", String(panel === "module-settings"));
+  $("nav-transport-presets").setAttribute("aria-pressed", String(panel === "transport-presets"));
+  if (focus) {
+    const parentLink = previous === "offline" ? $("nav-offline") : previous === "module-settings" ? $("nav-module-settings") : previous === "transport-presets" ? $("nav-transport-presets") : null;
+    (panel === "settings" && parentLink ? parentLink : $("settings-back")).focus({ preventScroll: true });
+  }
+}
+
+function openSettingsPage(panel = "settings") {
+  const page = $("settings-page");
+  if (page.hidden) {
+    settingsOpener = document.activeElement;
+    if (routingUI?.isOpen?.()) routingUI.close();
+    transportUI?.close();
+    closeSheet(false);
+    for (const panel of elements.sheet.querySelectorAll(".sheet-panel")) panel.hidden = true;
+    page.hidden = false;
+    page.inert = false;
+    page.setAttribute("aria-hidden", "false");
+  }
+  showSettingsPanel(panel);
+  $("nav-settings").setAttribute("aria-expanded", "true");
+  setMapInert(true);
+}
+
+function closeSettingsPage(restoreFocus = true) {
+  const page = $("settings-page");
+  const wasOpen = !page.hidden;
+  page.hidden = true;
+  page.inert = true;
+  page.setAttribute("aria-hidden", "true");
+  $("nav-settings").setAttribute("aria-expanded", "false");
+  setMapInert(elements.sheet.classList.contains("is-open"));
+  if (wasOpen && restoreFocus) {
+    const opener = settingsOpener?.isConnected && !settingsOpener.closest(".sheet, .settings-page") && !settingsOpener.inert ? settingsOpener : elements.layersButton;
+    opener.focus({ preventScroll: true });
+  }
+}
+
+function backSettingsPage() {
+  if (activeSettingsPanel === "transport-presets" && transportUI?.editorBack()) return;
+  if (activeSettingsPanel !== "settings") showSettingsPanel("settings");
+  else closeSettingsPage();
+}
+
+function openSheet(panel = "layers") {
+  panel = typeof panel === "string" ? panel : "layers";
+  if (["offline", "settings", "module-settings", "transport-presets"].includes(panel)) { openSettingsPage(panel); return; }
+  if (routingUI?.isOpen?.()) routingUI.close();
+  transportUI?.close();
+  if (!$("settings-page").hidden) closeSettingsPage(false);
+  if (!elements.sheet.classList.contains("is-open")) sheetOpener = document.activeElement;
+  switchPanel(panel);
   elements.sheet.inert = false;
   elements.scrim.classList.add("is-open");
   elements.sheet.classList.add("is-open");
@@ -1917,27 +2723,31 @@ function openSheet() {
   elements.closeSheet.focus();
 }
 
-function closeSheet() {
+function closeSheet(restoreFocus = true) {
+  if (!$("settings-page").hidden) closeSettingsPage(restoreFocus);
+  const wasOpen = elements.sheet.classList.contains("is-open");
   elements.scrim.classList.remove("is-open");
   elements.sheet.classList.remove("is-open");
   elements.sheet.setAttribute("aria-hidden", "true");
   elements.sheet.inert = true;
   elements.layersButton.setAttribute("aria-expanded", "false");
-  setMapInert(false);
-  elements.layersButton.focus();
+  setMapInert(!$("settings-page").hidden);
+  elements.layersButton.setAttribute("aria-pressed", "false");
+  $("nav-map").setAttribute("aria-pressed", "true");
+  if (wasOpen && restoreFocus) (sheetOpener && !sheetOpener.closest(".sheet, .settings-page") ? sheetOpener : elements.layersButton).focus({ preventScroll: true });
 }
 
 function setMapInert(inert) {
-  for (const node of document.querySelectorAll("#map, .topbar, .mode-switch, #recenter, #locate, #time-card")) {
+  for (const node of document.querySelectorAll("#map, .topbar, .map-toolbar, .map-actions, .bottom-nav, #time-card, .routing-chip")) {
     node.inert = inert;
   }
 }
 
 function fitRegion(animate) {
-  if (!map) return;
+  if (!map || !data) return;
   const padding = { top: 120, right: 24, bottom: 190, left: 24 };
   if (state.mode !== "3d") {
-    map.fitBounds(data.region.bounds, { padding, pitch: 0, bearing: 0, duration: animate ? 650 : 0 });
+    map.fitBounds(data.region.bounds, { padding, pitch: 0, bearing: map.getBearing(), duration: animate ? 650 : 0 });
     return;
   }
   const camera = map.cameraForBounds(data.region.bounds, { padding });
@@ -1945,13 +2755,13 @@ function fitRegion(animate) {
     map.easeTo({
       ...camera,
       zoom: Math.min(map.getMaxZoom(), Math.max(14.5, camera.zoom)),
-      pitch: 56,
-      bearing: -22,
+      pitch: pitchController.intent || 56,
+      bearing: map.getBearing(),
       duration: animate ? 650 : 0,
     });
     return;
   }
-  map.fitBounds(data.region.bounds, { padding, pitch: 56, bearing: -22, duration: animate ? 650 : 0 });
+  map.fitBounds(data.region.bounds, { padding, pitch: pitchController.intent || 56, bearing: map.getBearing(), duration: animate ? 650 : 0 });
 }
 
 function setConnectionWarning(message) {
@@ -1967,14 +2777,15 @@ function setConnectionWarning(message) {
 }
 
 function updateOnlineState() {
-  if (navigator.onLine) {
+  if (offlineBasemap?.isUsingOffline() || navigator.onLine) {
     elements.connection.classList.remove("is-visible");
   } else {
-    setConnectionWarning("Без подложки");
+    setConnectionWarning("Нет сети");
   }
 }
 
 function buildingPopup(event) {
+  if (routingUI?.isPicking?.()) return;
   const feature = event.features && event.features[0];
   if (!feature) return;
   const properties = feature.properties || {};
@@ -1995,9 +2806,8 @@ function buildingPopup(event) {
   popup.on("close", () => { popup = null; });
 }
 
-elements.regionName.textContent = data.region.name;
-elements.dataStatus.textContent = `${data.buildings.features.length} зданий · встроенный район`;
-elements.timeRange.max = String(frames.length - 1);
+elements.regionName.textContent = savedCamera ? "Последнее место" : "OpenStreetMap";
+elements.dataStatus.textContent = sceneDataStatus;
 elements.economyMode.checked = economyMode;
 updateSceneClock();
 updateWind(null);
@@ -2005,6 +2815,8 @@ applyControls();
 showFrame(state.frame);
 updateOnlineState();
 requestCityPacks();
+try { window.AndroidHost?.listOfflinePlaces?.(); } catch (error) { console.debug("Offline search unavailable", error); }
+$("offline-place-retry").addEventListener("click", () => window.AndroidHost?.prepareOfflinePlaces?.());
 renderPresets();
 setImportBusy(true);
 
@@ -2027,7 +2839,17 @@ elements.importFile.addEventListener("change", async () => {
   try { await importGeoJson(file.name, await file.text()); }
   catch (error) { window.SloiApp.onGeoJsonImportError(error.message); }
 });
-elements.cancelScene.addEventListener("click", () => cancelSceneLoad());
+elements.cancelScene.addEventListener("click", cancelPlaceOperation);
+elements.cancelShadowScene.addEventListener("click", () => {
+  shadowFailedView = JSON.stringify(currentViewportBox());
+  cancelPlaceOperation();
+});
+elements.demoButton.addEventListener("click", loadDemoScene);
+$("clear-scene").addEventListener("click", () => {
+  clearScene();
+  restoreSelectedLocation();
+  setPlaceStatus("Расчёт убран. Можно просматривать карту и добавлять свои слои.");
+});
 elements.retryFrame.addEventListener("click", () => showFrame(state.frame, false));
 elements.economyMode.addEventListener("change", () => {
   economyMode = elements.economyMode.checked;
@@ -2046,7 +2868,7 @@ elements.economyMode.addEventListener("change", () => {
 elements.sceneToday.addEventListener("click", () => { elements.sceneDate.value = localDateString(); });
 elements.sceneDateForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  loadSceneAt(data.region.center[1], data.region.center[0], data.region.name, { keepCamera: true })
+  loadViewportScene("Область карты")
     .catch((error) => setPlaceStatus(error.message, true));
 });
 
@@ -2064,7 +2886,7 @@ elements.presetForm.addEventListener("submit", (event) => {
   const preset = {
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
     name,
-    config: layerSettings.capturePreset(state, frames[state.frame].label),
+    config: layerSettings.capturePreset(state, frames[state.frame]?.label || "15:00"),
   };
   if (storePresets([...presets, preset])) {
     elements.presetName.value = "";
@@ -2073,6 +2895,21 @@ elements.presetForm.addEventListener("submit", (event) => {
 });
 
 elements.layersButton.addEventListener("click", openSheet);
+$("search-button").addEventListener("click", () => { openSheet("search"); elements.placeQuery.focus(); });
+$("route-open").addEventListener("click", () => routingUI?.open());
+$("transport-open").addEventListener("click", () => transportUI?.open());
+$("nav-map").addEventListener("click", closeSheet);
+$("nav-offline").addEventListener("click", () => openSheet("offline"));
+$("nav-module-settings").addEventListener("click", () => openSheet("module-settings"));
+$("nav-transport-presets").addEventListener("click", () => { openSettingsPage("transport-presets"); transportUI?.showEditor(); });
+$("settings-back").addEventListener("click", backSettingsPage);
+$("nav-settings").addEventListener("click", () => openSheet("settings"));
+for (const button of document.querySelectorAll(".sheet-tabs button")) button.addEventListener("click", () => switchPanel(button.dataset.panel));
+for (const button of document.querySelectorAll("#theme-options button")) button.addEventListener("click", () => {
+  themePreference = button.dataset.theme;
+  try { localStorage.setItem("sloi-theme", themePreference); } catch (_) { setPresetStatus("Тема действует, но не сохранится.", true); }
+  applyTheme();
+});
 elements.closeSheet.addEventListener("click", closeSheet);
 elements.scrim.addEventListener("click", closeSheet);
 elements.mode2d.addEventListener("click", () => {
@@ -2104,39 +2941,52 @@ elements.confidenceToggle.addEventListener("change", () => {
 });
 elements.timeRange.addEventListener("input", () => {
   stopPlayback();
-  showFrame(elements.timeRange.value);
+  invalidateFrameRequest();
+  if (window.AndroidHost?.cancelShadowFrame) window.AndroidHost.cancelShadowFrame();
+  if (sliderFrame !== null) cancelAnimationFrame(sliderFrame);
+  sliderFrame = requestAnimationFrame(() => { sliderFrame = null; showFrame(elements.timeRange.value); });
 });
 elements.play.addEventListener("click", startPlayback);
 elements.recenter.addEventListener("click", () => {
   haptic();
-  fitRegion(true);
+  if (selectedPlace) map.flyTo({ center: [selectedPlace.longitude, selectedPlace.latitude], zoom: 15, duration: 650 });
+  else if (data?.demo) fitRegion(true);
 });
 elements.locate.addEventListener("click", () => {
   haptic();
-  locateAndLoad();
+  locateOnMap();
 });
 elements.myLocation.addEventListener("click", () => {
   haptic();
-  locateAndLoad();
+  locateOnMap();
+});
+$("location-settings").addEventListener("click", () => {
+  const host = window.AndroidHost;
+  if ($("location-settings").dataset.locationOff === "true") host?.openLocationSettings?.();
+  else host?.openAppSettings?.();
 });
 elements.loadCenter.addEventListener("click", () => {
-  const center = map.getCenter();
   haptic();
-  loadSceneAt(center.lat, center.lng, "Центр карты").catch(console.warn);
+  loadViewportScene("Область карты")
+    .catch((error) => setPlaceStatus(error.message, true));
 });
 elements.placeForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const query = elements.placeQuery.value.trim();
-  if (query.length < 2) {
-    setPlaceStatus("Введите хотя бы два символа.", true);
-    return;
-  }
   searchPlaces(query);
 });
+elements.placeQuery.addEventListener("input", () => searchPlaces(elements.placeQuery.value, false));
+elements.placeQuery.addEventListener("compositionstart", () => placeSearchController().compositionStart());
+elements.placeQuery.addEventListener("compositionend", () => {
+  searchErrors.clear(); placeSearchController().compositionEnd(elements.placeQuery.value);
+});
+window.addEventListener("pagehide", cancelSearch);
 window.addEventListener("online", updateOnlineState);
 window.addEventListener("offline", updateOnlineState);
 document.addEventListener("visibilitychange", () => {
+  moduleHost?.setSuspended(document.hidden);
   if (document.hidden) {
+    saveCamera();
     stopPlayback();
     invalidateFrameRequest();
     if (window.AndroidHost && typeof window.AndroidHost.cancelShadowFrame === "function") window.AndroidHost.cancelShadowFrame();
@@ -2147,14 +2997,23 @@ document.addEventListener("visibilitychange", () => {
     scheduleViewportTiles();
   }
 });
+window.addEventListener("pagehide", saveCamera);
 document.addEventListener("keydown", (event) => {
-  if (!elements.sheet.classList.contains("is-open")) return;
+  const settingsOpen = !$("settings-page").hidden;
+  const surface = settingsOpen ? $("settings-page") : elements.sheet.classList.contains("is-open") ? elements.sheet : null;
+  if (!surface) return;
   if (event.key === "Escape") {
     event.preventDefault();
-    closeSheet();
+    if (settingsOpen) backSettingsPage(); else closeSheet();
   } else if (event.key === "Tab") {
-    const focusable = [...elements.sheet.querySelectorAll("button, input, select, summary, [tabindex='0']")]
-      .filter((node) => !node.disabled && node.getClientRects().length > 0);
+    const focusable = [...surface.querySelectorAll("button, input, select, summary, [tabindex='0']")]
+      .filter((node) => {
+        if (node.disabled || !node.getClientRects().length) return false;
+        for (let parent = node.parentElement; parent && parent !== surface; parent = parent.parentElement) {
+          if (parent.matches("details:not([open])") && parent.querySelector(":scope > summary") !== node) return false;
+        }
+        return true;
+      });
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
     if (event.shiftKey && document.activeElement === first) {
@@ -2173,38 +3032,42 @@ try {
     pixelRatio: renderPixelRatio(),
     maxTileCacheSize: 64,
     fadeDuration: 0,
-    center: data.region.center,
-    zoom: 14.8,
-    pitch: state.mode === "3d" ? 56 : 0,
-    bearing: state.mode === "3d" ? -22 : 0,
-    maxPitch: 70,
-    attributionControl: false,
-    style: {
-      version: 8,
-      sources: {
-        "carto-light": {
-          type: "raster",
-          tiles: ["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
-          tileSize: 256,
-          attribution: "© OpenStreetMap contributors © CARTO",
-        },
-        "carto-dark": {
-          type: "raster",
-          tiles: ["https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"],
-          tileSize: 256,
-          attribution: "© OpenStreetMap contributors © CARTO",
-        },
-      },
-      layers: [
-        { id: "base-light", type: "raster", source: "carto-light" },
-        {
-          id: "base-dark",
-          type: "raster",
-          source: "carto-dark",
-          layout: { visibility: "none" },
-        },
-      ],
+    ...(savedCamera || window.SloiMapCamera.defaultCamera),
+    pitch: storedPitch,
+    minZoom: 1,
+    maxZoom: 19,
+    maxPitch: 60,
+    cooperativeGestures: false,
+    bearingSnap: 0,
+    transformCameraUpdate: (next) => {
+      const result = pitchController.update(next);
+      state.mode = pitchController.intent > .1 ? "3d" : "2d";
+      return result;
     },
+    attributionControl: false,
+    style: (() => {
+      const style = window.SloiBasemap.createStyle(state.basemap);
+      style.sources.openmaptiles.url = offlineBasemap.initialUrl();
+      return style;
+    })(),
+  });
+  window.SloiMapGestures.install(map, { onActiveChange(active) {
+    mapTouchActive = active;
+    if (!active && mapReady) { scheduleViewportTiles(); scheduleShadowViewport(); showFrame(state.frame, false); }
+  } });
+  // Manual camera input owns navigation. A late GPS, example or route reply
+  // must not pull the map back after the user has begun exploring elsewhere.
+  const cameraSurface = map.getCanvasContainer();
+  const manualCameraInput = (event) => {
+    if (!event.isTrusted || !cameraSurface.contains(event.target)) return;
+    if (event.type === "keydown" && !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "+", "-", "="].includes(event.key)) return;
+    cameraInputGeneration++;
+    navigationGeneration++;
+    invalidateLocation();
+  };
+  for (const type of ["pointerdown", "wheel", "keydown"]) window.addEventListener(type, manualCameraInput, { capture: true, passive: true });
+  map.on("remove", () => {
+    for (const type of ["pointerdown", "wheel", "keydown"]) window.removeEventListener(type, manualCameraInput, true);
   });
   map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
 
@@ -2212,11 +3075,11 @@ try {
     if (mapReady) return;
     map.addSource("shadows", {
       type: "geojson",
-      data: shadowCollection(frames[state.frame].geometry),
+      data: shadowCollection(null),
     });
     map.addSource("buildings", {
       type: "geojson",
-      data: data.buildings,
+      data: { type: "FeatureCollection", features: [] },
     });
     map.addSource("selected-location", {
       type: "geojson",
@@ -2244,7 +3107,7 @@ try {
       source: "buildings",
       paint: {
         "fill-color": neutralBuildingColor,
-        "fill-opacity": .8,
+        "fill-opacity": state.buildingOpacity,
         "fill-outline-color": "#8b928c",
       },
     });
@@ -2256,7 +3119,7 @@ try {
         "fill-extrusion-color": neutralBuildingColor,
         "fill-extrusion-height": ["get", "height"],
         "fill-extrusion-base": ["get", "min_height"],
-        "fill-extrusion-opacity": .9,
+        "fill-extrusion-opacity": state.buildingOpacity,
         "fill-extrusion-vertical-gradient": true,
       },
     });
@@ -2307,13 +3170,22 @@ try {
       },
     });
 
+    map.addLayer({ id: "module-anchor", type: "background", paint: { "background-opacity": 0 } }, "selected-location");
     mapReady = true;
+    offlineBasemap.refresh();
     initializeLayerRuntime();
     applyMapState();
     showFrame(state.frame);
-    fitRegion(false);
     scheduleViewportTiles();
     restoreCustomLayers();
+    initializeModules();
+    routingUI = window.SloiRoutingUI.install({ map,
+      getDestination: () => selectedPlace,
+      getCurrentPosition,
+      searchPlaces: queryPlaceSuggestions,
+      onOpen: () => { transportUI?.close(); closeSheet(); cancelSearch(); },
+      onClose: () => $("route-open").focus({ preventScroll: true }),
+    });
     elements.loading.classList.add("is-hidden");
 
     for (const layer of ["buildings-flat", "buildings-3d"]) {
@@ -2335,6 +3207,26 @@ try {
     }
   });
   map.on("moveend", scheduleViewportTiles);
+  map.on("moveend", scheduleShadowViewport);
+  map.on("moveend", saveCamera);
+  map.on("moveend", () => offlineBasemap.refresh());
+  map.on("move", () => {
+    const meters = window.SloiMapCamera.scaleMeters(map.getCenter().lat, map.getZoom());
+    $("map-scale-label").textContent = meters >= 1000 ? `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)} км` : `${Math.round(meters)} м`;
+    updateBuildingVisibility();
+  });
+  map.on("movestart", () => {
+    stopPlayback();
+    invalidateFrameRequest();
+    if (window.AndroidHost?.cancelShadowFrame) window.AndroidHost.cancelShadowFrame();
+  });
+  map.on("moveend", () => { applyMapState(); showFrame(state.frame, false); });
+  map.on("click", (event) => {
+    const ids = map.getStyle().layers.filter((layer) => layer.id.startsWith("module-")).map((layer) => layer.id);
+    if (!ids.length) return;
+    const features = map.queryRenderedFeatures(event.point, { layers: ids });
+    if (features.length) showCustomPopup({ features, lngLat: event.lngLat });
+  });
 } catch (error) {
   console.error(error);
   showFatal(error.message || "Ошибка запуска карты");

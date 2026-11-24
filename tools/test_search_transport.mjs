@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source=fs.readFileSync(new URL('../app/src/main/assets/modules/bundled.js',import.meta.url),'utf8');
+function load(fetch){const c={window:{fetch},AbortController,URL,URLSearchParams,TextDecoder,setTimeout,clearTimeout};vm.createContext(c);vm.runInContext(source,c);return c.window.SloiBundledModules;}
+const requests=[];
+const api=load(async(url,options)=>{requests.push({url,options});return new Response(JSON.stringify([{Id:1,ShortName:'26',Name:'Улица — метро'},{Id:2,ShortName:'260'},{Id:3,ShortName:'26'},{Id:4,ShortName:'12'}]));});
+const definitions=[];api.register({register:manifest=>definitions.push(manifest)});
+assert.deepEqual(definitions.map(x=>x.id),['spb-bus'],'Coordinate grid is removed from registration');
+assert.equal(api.controls['coordinate-grid'],undefined);assert.equal(api.gridGeometry,undefined);
+const provider=api.searchProviders[0];assert.equal(provider.moduleId,'spb-bus');
+assert.equal((await provider.search('Невский')).length,0);assert.equal((await provider.search('ул 26')).length,0);assert.equal(requests.length,0);
+const result=await provider.search('автобус26');assert.equal(result.length,2);
+assert.equal(result[0].title,'Автобус 26');assert.equal(result[0].subtitle,'Улица — метро');
+assert.equal(result[0].settings.route,'26');assert.equal(result[0].moduleId,'spb-bus');
+assert.equal(new URLSearchParams(requests[0].options.body).get('routeShortName'),'26');
+await provider.search('№ 26');assert.equal(requests.length,1,'Route search shares bounded response cache');
+let abortedSignal;
+const pending=load((_url,options)=>new Promise((_resolve,reject)=>{abortedSignal=options.signal;options.signal.addEventListener('abort',()=>reject(new Error('canceled')));}));
+const controller=new AbortController();const promise=pending.searchProviders[0].search('26',{signal:controller.signal});controller.abort();
+await assert.rejects(promise,{name:'AbortError'});assert(abortedSignal.aborted);
+console.log('Transport search OK: module-owned provider, route prefixes, cache, stale cancellation, no coordinate grid');

@@ -23,7 +23,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   Array.from(settings.registry, (layer) => layer.defaultOpacity),
-  [0.38, 0.96, 0.85, 0.9],
+  [0.38, 0.65, 0.85, 0.9],
 );
 assert.equal(settings.registry.find((layer) => layer.id === "sun").defaultEnabled, false);
 
@@ -34,7 +34,7 @@ const legacy = settings.normalizeState(
 assert.equal(legacy.mode, "2d");
 assert.equal(legacy.basemap, "dark");
 assert.equal(legacy.shadows, false);
-assert.equal(legacy.buildingOpacity, 0.96);
+assert.equal(legacy.buildingOpacity, 0.65);
 assert.equal(legacy.windOpacity, 0.85);
 assert.equal(legacy.sun, false);
 assert.equal(legacy.sunOpacity, 0.9);

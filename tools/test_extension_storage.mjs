@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const sandbox={window:{},TextEncoder};vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(new URL('../app/src/main/assets/extension-storage.js',import.meta.url),'utf8'),sandbox);
+const {create}=sandbox.window.SloiExtensionStorage;
+const key='sloi-transport-presets',old=JSON.stringify({version:1,presets:[],activeId:null}),fresh=JSON.stringify({version:1,presets:[{id:'one'}],activeId:'one'});
+const memory=()=>{const values=new Map();return{getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),values}};
+const local=memory(),disk=memory();local.setItem(key,old);
+let writes=0,fail=false;
+const native={readExtensionState:k=>disk.getItem(k),writeExtensionState(k,v){writes++;if(fail)return false;disk.setItem(k,v);return true;}};
+let store=create({native,fallback:local});
+assert.equal(store.getItem(key),old);assert.equal(writes,1,'Legacy local state migrates once');
+assert.equal(store.getItem(key),old);assert.equal(writes,1);
+store.setItem(key,fresh);assert.equal(disk.getItem(key),fresh);
+// Recreating both WebView and its local storage cannot lose committed presets.
+store=create({native,fallback:memory()});assert.equal(store.getItem(key),fresh);
+const stale=memory();stale.setItem(key,old);assert.equal(create({native,fallback:stale}).getItem(key),fresh);
+fail=true;assert.throws(()=>store.setItem(key,old),/сохранить/);assert.equal(disk.getItem(key),fresh);
+const count=writes;assert.throws(()=>store.setItem('arbitrary','x'),/Неизвестное/);
+assert.throws(()=>store.getItem('__proto__'),/Неизвестное/);
+assert.throws(()=>store.setItem(key,'я'.repeat(32769)),/объём/);assert.equal(writes,count);
+const fallback=create({fallback:local});fallback.setItem(key,old);assert.equal(fallback.getItem(key),old);
+assert.throws(()=>create().setItem(key,old),/недоступно/);
+fail=false;create({native,fallback:{setItem(){throw Error('quota')}}}).setItem(key,fresh);assert.equal(disk.getItem(key),fresh,'Failed mirror cannot discard an acknowledged native commit');
+console.log('Extension storage OK: native disk acknowledgement, local migration, restart with empty/stale WebView storage, failed-write isolation, key/UTF8 limits and browser fallback');

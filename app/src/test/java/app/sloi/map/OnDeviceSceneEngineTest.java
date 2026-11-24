@@ -18,8 +18,21 @@ import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.Polygon;
 
-/** JVM tests deliberately exercise helpers that do not require Android's org.json runtime. */
+/** Geometry helpers and serialized native/WebView boundary contracts. */
 public final class OnDeviceSceneEngineTest {
+    @Test public void serializedRegionContainsBothCoordinatesOfBothCorners() throws Exception {
+        OnDeviceSceneEngine.Bbox box = new OnDeviceSceneEngine.Bbox(59.8, 30.2, 59.9, 30.4);
+        org.json.JSONObject region = new org.json.JSONObject(box.mapRegion("test", "Район", 59.85, 30.3).toString());
+        org.json.JSONArray bounds = region.getJSONArray("bounds");
+        assertEquals(2, bounds.length());
+        assertEquals(2, bounds.getJSONArray(0).length());
+        assertEquals(2, bounds.getJSONArray(1).length());
+        assertEquals(30.2, bounds.getJSONArray(0).getDouble(0), 0);
+        assertEquals(59.8, bounds.getJSONArray(0).getDouble(1), 0);
+        assertEquals(30.4, bounds.getJSONArray(1).getDouble(0), 0);
+        assertEquals(59.9, bounds.getJSONArray(1).getDouble(1), 0);
+    }
+
     @Test public void sunPositionMatchesExpectedNoonAndNightPolarity() {
         double[] noon = OnDeviceSceneEngine.sunPosition(
             OffsetDateTime.parse("2026-06-21T12:00:00+03:00"), 59.93, 30.36);
@@ -56,32 +69,134 @@ public final class OnDeviceSceneEngineTest {
         assertTrue(Double.isFinite(OnDeviceSceneEngine.minimumHeight(null, null)));
     }
 
-    @Test public void cacheKeyDiffersForDifferentPlacesAndRadii() {
-        String petersburg = OnDeviceSceneEngine.cacheKey(59.9311, 30.3609, 450);
-        assertFalse(petersburg.equals(OnDeviceSceneEngine.cacheKey(55.7558, 37.6173, 450)));
-        assertFalse(petersburg.equals(OnDeviceSceneEngine.cacheKey(59.9311, 30.3609, 550)));
+    private static OnDeviceSceneEngine.Bbox displayBounds() {
+        return new OnDeviceSceneEngine.Bbox(59.925, 30.35, 59.937, 30.37);
     }
 
-    @Test public void sceneIdentityUsesExactCenterAndDataRevision() {
-        String first = OnDeviceSceneEngine.sceneIdFor(59.9311000, 30.3609000, 450, "2026-07-29", 180, 900, "city-pack:spb", "v1");
-        String shiftedInsideCacheGrid = OnDeviceSceneEngine.sceneIdFor(59.9312000, 30.3609000, 450, "2026-07-29", 180, 900, "city-pack:spb", "v1");
-        String updatedPack = OnDeviceSceneEngine.sceneIdFor(59.9311000, 30.3609000, 450, "2026-07-29", 180, 900, "city-pack:spb", "v2");
-        assertFalse(first.equals(shiftedInsideCacheGrid));
+    @Test public void cacheAndSceneIdentityUseEveryViewportEdge() {
+        OnDeviceSceneEngine.Bbox bounds = displayBounds();
+        String raw = OnDeviceSceneEngine.cacheKey(bounds);
+        String first = OnDeviceSceneEngine.sceneIdFor(bounds, "2026-07-29", 180, 900, "city-pack:spb", "v1");
+        for (OnDeviceSceneEngine.Bbox changed : Arrays.asList(
+                new OnDeviceSceneEngine.Bbox(59.92500001, 30.35, 59.937, 30.37),
+                new OnDeviceSceneEngine.Bbox(59.925, 30.35000001, 59.937, 30.37),
+                new OnDeviceSceneEngine.Bbox(59.925, 30.35, 59.93700001, 30.37),
+                new OnDeviceSceneEngine.Bbox(59.925, 30.35, 59.937, 30.37000001))) {
+            assertFalse(raw.equals(OnDeviceSceneEngine.cacheKey(changed)));
+            assertFalse(first.equals(OnDeviceSceneEngine.sceneIdFor(changed, "2026-07-29", 180, 900, "city-pack:spb", "v1")));
+        }
+        String updatedPack = OnDeviceSceneEngine.sceneIdFor(bounds, "2026-07-29", 180, 900, "city-pack:spb", "v2");
         assertFalse(first.equals(updatedPack));
+        OnDeviceSceneEngine.Bbox widerWithSameCenter = new OnDeviceSceneEngine.Bbox(59.925, 30.34, 59.937, 30.38);
+        assertFalse(first.equals(OnDeviceSceneEngine.sceneIdFor(widerWithSameCenter, "2026-07-29", 180, 900, "city-pack:spb", "v1")));
     }
 
     @Test public void sceneIdentitySeparatesEffectiveSolarDateAndTimezone() {
-        String first = OnDeviceSceneEngine.sceneIdFor(59.9311, 30.3609, 450, "2026-07-29", 180, 900, "city-pack:spb", "v1");
-        String nextDate = OnDeviceSceneEngine.sceneIdFor(59.9311, 30.3609, 450, "2026-07-30", 180, 900, "city-pack:spb", "v1");
-        String differentTimezone = OnDeviceSceneEngine.sceneIdFor(59.9311, 30.3609, 450, "2026-07-29", 240, 900, "city-pack:spb", "v1");
+        String first = OnDeviceSceneEngine.sceneIdFor(displayBounds(), "2026-07-29", 180, 900, "city-pack:spb", "v1");
+        String nextDate = OnDeviceSceneEngine.sceneIdFor(displayBounds(), "2026-07-30", 180, 900, "city-pack:spb", "v1");
+        String differentTimezone = OnDeviceSceneEngine.sceneIdFor(displayBounds(), "2026-07-29", 240, 900, "city-pack:spb", "v1");
         assertFalse(first.equals(nextDate));
         assertFalse(first.equals(differentTimezone));
     }
 
     @Test public void solarFramesUseTheRequestedLocalDateAndOffset() {
         OnDeviceSceneEngine.SceneRequest request = new OnDeviceSceneEngine.SceneRequest(
-            "request", 59.9311, 30.3609, 450, "2026-12-31", -210, 30, "place");
+            "request", displayBounds(), "2026-12-31", -210, 30, "place");
         assertEquals("2026-12-31T00:30-03:30", request.at(30).toString());
+    }
+
+    @Test public void sceneRequestUsesFullViewportAndDerivesItsCenter() {
+        OnDeviceSceneEngine.SceneRequest request = OnDeviceSceneEngine.SceneRequest.fromJson(
+            "{\"requestId\":\"viewport\",\"displayBounds\":[[30.35,59.925],[30.37,59.937]],"
+                + "\"localDate\":\"2026-07-29\",\"timezoneOffsetMinutes\":180,\"selectedMinutes\":900}");
+        assertEquals(59.931, request.latitude, 1e-10);
+        assertEquals(30.36, request.longitude, 1e-10);
+        assertEquals(30.35, request.displayBounds.west, 0);
+        assertEquals(59.937, request.displayBounds.north, 0);
+        request.validate();
+    }
+
+    @Test public void sceneRequestRejectsOldRadiusAndMalformedCornerArrays() {
+        for (String input : Arrays.asList(
+                "{\"latitude\":59.9,\"longitude\":30.3,\"radiusM\":450}",
+                "{\"displayBounds\":[[30.3,59.9],[30.4]]}",
+                "{\"displayBounds\":[[30.3,59.9],[30.4,60.0],[30.5,60.1]]}")) {
+            try {
+                OnDeviceSceneEngine.SceneRequest.fromJson(input);
+                throw new AssertionError("Legacy or malformed request was accepted");
+            } catch (IllegalArgumentException expected) {
+                assertTrue(expected.getMessage().contains("displayBounds"));
+            }
+        }
+    }
+
+    @Test public void sceneRequestRejectsInvalidOrOversizedViewportWithoutCropping() {
+        for (OnDeviceSceneEngine.Bbox bounds : Arrays.asList(
+                new OnDeviceSceneEngine.Bbox(Double.NaN, 30, 60, 31),
+                new OnDeviceSceneEngine.Bbox(59, 30, Double.POSITIVE_INFINITY, 31),
+                new OnDeviceSceneEngine.Bbox(59, Double.NEGATIVE_INFINITY, 60, 31),
+                new OnDeviceSceneEngine.Bbox(59, 30, 60, Double.NaN),
+                new OnDeviceSceneEngine.Bbox(-86, 30, -84, 31),
+                new OnDeviceSceneEngine.Bbox(84, 30, 86, 31),
+                new OnDeviceSceneEngine.Bbox(59, -181, 60, -179),
+                new OnDeviceSceneEngine.Bbox(59, 179, 60, 181),
+                new OnDeviceSceneEngine.Bbox(59, 179, 60, -179),
+                new OnDeviceSceneEngine.Bbox(60, 30, 59, 31),
+                new OnDeviceSceneEngine.Bbox(59, 30, 59, 31),
+                new OnDeviceSceneEngine.Bbox(0, 0, .001, .06),
+                new OnDeviceSceneEngine.Bbox(0, 0, .06, .001),
+                new OnDeviceSceneEngine.Bbox(0, 0, .04, .04))) {
+            try {
+                new OnDeviceSceneEngine.SceneRequest("test", bounds, "2026-07-29", 180, 900, "").validate();
+                throw new AssertionError("Invalid or oversized viewport was accepted");
+            } catch (IllegalArgumentException expected) {
+                assertTrue(expected.getMessage().contains("displayBounds") || expected.getMessage().contains("Приблизьте"));
+            }
+        }
+        // More than the old test radius is allowed when the entire viewport fits the budget.
+        new OnDeviceSceneEngine.SceneRequest("wide", new OnDeviceSceneEngine.Bbox(0, 0, .02, .04),
+            "2026-07-29", 180, 900, "").validate();
+    }
+
+    @Test public void cachedSceneCoversFullViewportBeyondOldRadiusWithoutWindNetwork() throws Exception {
+        File root = Files.createTempDirectory("sloi-viewport-scene").toFile();
+        File cache = new File(root, "raw"), generated = new File(root, "generated");
+        OnDeviceSceneEngine engine = new OnDeviceSceneEngine(cache, generated);
+        OnDeviceSceneEngine.Bbox bounds = new OnDeviceSceneEngine.Bbox(59.9, 30.3, 59.92, 30.35);
+        org.json.JSONArray elements = new org.json.JSONArray();
+        // Both footprints lie over one kilometre from the centre. A legacy 450m
+        // scene would omit them even though they are visible in this viewport.
+        for (int building = 0; building < 2; building++) {
+            double west = building == 0 ? 30.302 : 30.346;
+            long first = building * 10 + 1;
+            org.json.JSONArray nodeIds = new org.json.JSONArray();
+            double[][] coordinates = {{west, 59.905}, {west + .001, 59.905},
+                {west + .001, 59.906}, {west, 59.906}};
+            for (int node = 0; node < coordinates.length; node++) {
+                elements.put(new org.json.JSONObject().put("type", "node").put("id", first + node)
+                    .put("lon", coordinates[node][0]).put("lat", coordinates[node][1]));
+                nodeIds.put(first + node);
+            }
+            nodeIds.put(first);
+            elements.put(new org.json.JSONObject().put("type", "way").put("id", building + 100)
+                .put("nodes", nodeIds).put("tags", new org.json.JSONObject().put("building", "yes").put("height", "12")));
+        }
+        org.json.JSONObject raw = new org.json.JSONObject().put("cacheVersion", 1)
+            .put("queryBounds", bounds.expand(OnDeviceSceneEngine.MAX_SHADOW_M).json()).put("elements", elements);
+        Files.write(new File(cache, "osm-v1-" + OnDeviceSceneEngine.cacheKey(bounds) + ".json").toPath(),
+            raw.toString().getBytes(StandardCharsets.UTF_8));
+        OnDeviceSceneEngine.SceneBuildResult result = engine.buildScene(new OnDeviceSceneEngine.SceneRequest(
+            "viewport", bounds, "2026-07-17", 180, 900, "Видимая область"), null);
+        org.json.JSONObject bundle = new org.json.JSONObject(new String(
+            Files.readAllBytes(new File(generated, result.file).toPath()), StandardCharsets.UTF_8));
+        assertTrue(result.cacheHit);
+        assertEquals(2, bundle.getJSONObject("buildings").getJSONArray("features").length());
+        org.json.JSONArray actualBounds = bundle.getJSONObject("region").getJSONArray("bounds");
+        assertEquals(bounds.west, actualBounds.getJSONArray(0).getDouble(0), 0);
+        assertEquals(bounds.south, actualBounds.getJSONArray(0).getDouble(1), 0);
+        assertEquals(bounds.east, actualBounds.getJSONArray(1).getDouble(0), 0);
+        assertEquals(bounds.north, actualBounds.getJSONArray(1).getDouble(1), 0);
+        assertFalse(bundle.getJSONObject("layers").has("wind"));
     }
 
     @Test public void pinnedSceneSurvivesCompletedSuccessorChurn() {
@@ -265,6 +380,66 @@ public final class OnDeviceSceneEngineTest {
             OnDeviceSceneEngine.bearing(20, 180), OnDeviceSceneEngine.bearing(10, 180)));
         assertFalse("min_height shifts the first shadow away from the footprint",
             elevated.covers(OnDeviceSceneEngine.GF.createPoint(new Coordinate(5, 5))));
+    }
+
+    @Test public void frameTextCacheEvictsByRetainedBytesAndAccessOrder() {
+        String response = "x".repeat(100);
+        long entryBytes = OnDeviceSceneEngine.FrameTextCache.entryBytes("a", response);
+        OnDeviceSceneEngine.FrameTextCache cache = new OnDeviceSceneEngine.FrameTextCache(entryBytes * 2, 8);
+        cache.put("a", response);
+        cache.put("b", response);
+        assertEquals(response, cache.get("a")); // a is now more recent than b.
+        cache.put("c", response);
+        assertEquals(null, cache.get("b"));
+        assertEquals(response, cache.get("a"));
+        assertEquals(response, cache.get("c"));
+        assertEquals(2, cache.size());
+        assertEquals(entryBytes * 2, cache.retainedBytes());
+    }
+
+    @Test public void oversizedFrameIsDiskOnlyWithoutEvictingOtherScenes() {
+        OnDeviceSceneEngine.FrameTextCache cache = new OnDeviceSceneEngine.FrameTextCache(1024, 8);
+        cache.put("scene-a:1", "old frame");
+        cache.put("scene-b:1", "other scene");
+        cache.put("scene-a:1", "x".repeat(1024));
+        assertEquals(null, cache.get("scene-a:1"));
+        assertEquals("other scene", cache.get("scene-b:1"));
+        assertEquals(1, cache.size());
+        assertEquals(OnDeviceSceneEngine.FrameTextCache.entryBytes("scene-b:1", "other scene"), cache.retainedBytes());
+    }
+
+    @Test public void frameCacheReplacementPreservesResponseAndClearsAccounting() {
+        OnDeviceSceneEngine.FrameTextCache cache = new OnDeviceSceneEngine.FrameTextCache(1024, 1);
+        String response = "{sceneId:scene-a,frameIndex:1,geometry:original}";
+        cache.put("scene-a:1", response);
+        assertTrue("cache must return the same response without reparsing or altering geometry", response == cache.get("scene-a:1"));
+        cache.put("scene-a:1", "replacement");
+        assertEquals(OnDeviceSceneEngine.FrameTextCache.entryBytes("scene-a:1", "replacement"), cache.retainedBytes());
+        cache.put("scene-b:1", "other scene");
+        assertEquals(null, cache.get("scene-a:1"));
+        assertEquals("other scene", cache.get("scene-b:1"));
+        cache.clear();
+        assertEquals(0, cache.size());
+        assertEquals(0, cache.retainedBytes());
+    }
+
+    @Test public void shadowSweepObservesCancellationRaisedInsideFootprintTraversal() {
+        Polygon footprint = rectangle(0, 0, 10, 10);
+        Polygon interrupting = new Polygon((org.locationtech.jts.geom.LinearRing) footprint.getExteriorRing(),
+                null, OnDeviceSceneEngine.GF) {
+            @Override public org.locationtech.jts.geom.LinearRing getExteriorRing() {
+                Thread.currentThread().interrupt();
+                return super.getExteriorRing();
+            }
+        };
+        try {
+            OnDeviceSceneEngine.sweep(interrupting, new Coordinate(0, 10), new Coordinate(0, 0));
+            org.junit.Assert.fail("cancelled sweep must stop before returning obsolete geometry");
+        } catch (OnDeviceSceneEngine.CancelledException expected) {
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     private static Polygon rectangle(double x0, double y0, double x1, double y1) {

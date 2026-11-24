@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors><certificates src="system" /></trust-anchors>
+    </base-config>
+    <!-- The portal serves the old intermediate despite its leaf using the 2024
+         key. Supply the verified official chain for this hostname only. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">transport.orgp.spb.ru</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/transit_root_ca" />
+            <certificates src="@raw/transit_sub_ca_2024" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

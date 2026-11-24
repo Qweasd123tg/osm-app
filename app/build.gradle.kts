@@ -10,8 +10,8 @@ android {
         applicationId = "app.sloi.map"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.5.0"
+        versionCode = 14
+        versionName = "0.6.8"
     }
 
     buildTypes {
@@ -38,4 +38,5 @@ dependencies {
     implementation("androidx.webkit:webkit:1.16.0")
     implementation("org.locationtech.jts:jts-core:1.20.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

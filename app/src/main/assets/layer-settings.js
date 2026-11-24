@@ -19,7 +19,7 @@
       source: "OpenStreetMap",
       dataType: "geojson",
       opacityKey: "buildingOpacity",
-      defaultOpacity: 0.96,
+      defaultOpacity: 0.65,
       defaultEnabled: true,
       min: 0.1,
       max: 1,

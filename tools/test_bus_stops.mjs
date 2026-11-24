@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const asset=name=>fs.readFileSync(new URL(`../app/src/main/assets/modules/${name}`,import.meta.url),'utf8');
+const data=JSON.parse(asset('bus-stops-spb.json'));
+function harness(fetch) {
+  let factory,move,view={zoom:14,bounds:[[30.31,59.92],[30.35,59.95]]},calls=0,unsubscribed=0;
+  const sandbox={window:{fetch:async(...args)=>{calls++;return fetch(...args);}},AbortController,TextDecoder};vm.createContext(sandbox);vm.runInContext(asset('bus-stops.js'),sandbox);
+  const api=sandbox.window.SloiBusStops;api.register({register(manifest,fn){assert.equal(manifest.id,'spb-stops');factory=fn;}});
+  const signal=new AbortController(),renders=[];
+  const ctx={signal:signal.signal,getView:()=>view,onMove(fn){move=fn;return()=>unsubscribed++;},setGeoJson(id,data,options){assert.equal(id,'stops');renders.push({data,options});}};
+  return{api,ctx,signal,renders,start:()=>factory(ctx),move:async patch=>{view={...view,...patch};return move(view);},calls:()=>calls,unsubscribed:()=>unsubscribed};
+}
+let h=harness(async()=>new Response(JSON.stringify(data)));
+assert.equal(h.api.validate(data).length,4518);
+const cleanup=await h.start();assert.equal(h.calls(),0,'The overview does not load any stop data');
+await h.move({zoom:16});assert.equal(h.calls(),1);
+assert(h.renders.at(-1).data.features.length>0);
+assert(h.renders.at(-1).data.features.every(f=>f.properties.kind==='bus_stop'&&f.properties.name&&f.geometry.type==='Point'));
+assert.equal(h.renders.at(-1).options.pointMinZoom,15);assert.equal(h.renders.at(-1).options.pointLabelMinZoom,16);
+await h.move({bounds:[[30.3,59.9],[30.4,60]]});assert.equal(h.calls(),1,'Later views use the bundled snapshot cache');
+await h.move({zoom:14});assert.equal(h.renders.at(-1).data.features.length,0);
+cleanup();cleanup();assert.equal(h.unsubscribed(),1);
+const count=h.renders.length;await h.move({zoom:16});assert.equal(h.renders.length,count);
+for(const modified of [{...data,license:'unknown'},{...data,stops:[data.stops[0],data.stops[0]]},{...data,stops:[['1','bad',200,0]]}])assert.throws(()=>h.api.validate(modified),/повреждены/);
+assert.equal(h.api.forView(data.stops,{zoom:14,bounds:[[29,59],[32,61]]}).features.length,0);
+assert.equal(h.api.forView(data.stops,{zoom:16,bounds:[[29,59],[32,61]]}).features.length,512);
+// A delayed local load cannot attach data after zooming out or disabling.
+let respond;h=harness(()=>new Promise(resolve=>respond=resolve));await h.start();const pending=h.move({zoom:16});
+await h.move({zoom:14});respond(new Response(JSON.stringify(data)));await pending;
+assert.equal(h.renders.at(-1).data.features.length,0);
+h.signal.abort();assert.equal(h.unsubscribed(),1);
+h=harness(async()=>new Response('{}',{headers:{'content-length':String(512*1024+1)}}));await h.start();
+await assert.rejects(h.move({zoom:16}),/большие/);h.signal.abort();
+console.log('Bus stops OK: 4518 real offline points, lazy street-scale loading, named viewport filtering, separate label LOD, bounded data, cache, cancellation and cleanup');

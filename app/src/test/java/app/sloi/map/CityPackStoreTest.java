@@ -11,7 +11,10 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.Test;
 import org.locationtech.jts.geom.Envelope;
@@ -20,6 +23,50 @@ import org.locationtech.jts.io.WKBWriter;
 
 /** Pure helper coverage: Android SQLite and HTTPS are intentionally not needed by these tests. */
 public final class CityPackStoreTest {
+    @Test public void progressThrottlesByteBurstsButKeepsInitialPhasesAndCompletion() {
+        AtomicLong nanos = new AtomicLong(1_000_000_000L);
+        List<String> events = new ArrayList<>();
+        CityPackStore.ThrottledProgress progress = new CityPackStore.ThrottledProgress(
+            (phase, current, total) -> events.add(phase + ":" + current + "/" + total), nanos::get);
+        progress.onProgress("metadata", 0, 1);
+        progress.onProgress("metadata", 1, 1);
+        progress.onProgress("download", 0, 10000);
+        // Fast 32-KiB-like bursts must not enqueue one WebView update per read.
+        for (int current = 1; current < 1000; current++) progress.onProgress("download", current, 10000);
+        assertEquals(4, events.size());
+        nanos.addAndGet(149_000_000L);
+        progress.onProgress("download", 1000, 10000);
+        assertEquals(4, events.size());
+        nanos.addAndGet(1_000_000L);
+        progress.onProgress("download", 2000, 10000);
+        assertEquals("download:2000/10000", events.get(4));
+        progress.onProgress("download", 10000, 10000);
+        progress.onProgress("download", 10000, 10000); // No duplicate completion.
+        progress.onProgress("extract", 0, 30000);
+        progress.onProgress("extract", 1, 30000);
+        progress.onProgress("extract", 30000, 30000);
+        progress.onProgress("index", 0, 1);
+        progress.onProgress("index", 1, 1);
+        progress.onProgress("ready", 1, 1);
+        assertEquals(java.util.Arrays.asList(
+            "metadata:0/1", "metadata:1/1", "download:0/10000", "download:1/10000", "download:2000/10000",
+            "download:10000/10000", "extract:0/30000", "extract:1/30000", "extract:30000/30000",
+            "index:0/1", "index:1/1", "ready:1/1"), events);
+    }
+
+    @Test public void progressCompletesUnknownLengthTransfersAndDoesNotShareOperationState() {
+        AtomicLong nanos = new AtomicLong();
+        List<String> events = new ArrayList<>();
+        CityPackStore.ProgressListener listener = (phase, current, total) -> events.add(current + "/" + total);
+        CityPackStore.ThrottledProgress first = new CityPackStore.ThrottledProgress(listener, nanos::get);
+        CityPackStore.ThrottledProgress second = new CityPackStore.ThrottledProgress(listener, nanos::get);
+        first.onProgress("download", 0, -1);
+        first.onProgress("download", 100, -1);
+        second.onProgress("download", 0, -1);
+        first.onProgress("download", 100, 100);
+        assertEquals(java.util.Arrays.asList("0/-1", "100/-1", "0/-1", "100/100"), events);
+    }
+
     @Test public void geoPackageXyEnvelopeAndWkbOffsetRespectLittleEndianHeader() throws Exception {
         byte[] wkb = new WKBWriter().write(OnDeviceSceneEngine.GF.createPoint(new org.locationtech.jts.geom.Coordinate(30.36, 59.93)));
         byte[] blob = new byte[40 + wkb.length];

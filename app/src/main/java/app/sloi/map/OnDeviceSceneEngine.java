@@ -49,8 +49,9 @@ public final class OnDeviceSceneEngine {
     static final double EARTH_RADIUS_M = 6378137d;
     static final double MAX_SHADOW_M = 350d;
     private static final int CACHE_VERSION = 1;
-    private static final int SCENE_ID_VERSION = 2;
+    private static final int SCENE_ID_VERSION = 3;
     private static final int MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
+    private static final int MAX_SCENE_BUILDINGS = 5000;
     private static final long RAW_CACHE_BYTES = 64L * 1024 * 1024;
     private static final long GENERATED_CACHE_BYTES = 24L * 1024 * 1024;
     private static final int VIEWPORT_FORMAT_VERSION = 1;
@@ -73,9 +74,8 @@ public final class OnDeviceSceneEngine {
     private final Set<HttpsURLConnection> activeConnections = Collections.synchronizedSet(new HashSet<>());
     /** Retain only the scene shown by the UI and the latest completed replacement. */
     private final PinnedLruCache<SceneContext> contexts = new PinnedLruCache<>(1);
-    private final LinkedHashMap<String, String> frames = new LinkedHashMap<String, String>(8, .75f, true) {
-        @Override protected boolean removeEldestEntry(Map.Entry<String, String> eldest) { return size() > 8; }
-    };
+    /** Text accounting is a conservative UTF-16 estimate, not a bound on total process heap. */
+    private final FrameTextCache frames = new FrameTextCache(4L * 1024 * 1024, 8);
 
     public OnDeviceSceneEngine(File cacheDir, File generatedDir) {
         this(cacheDir, generatedDir, new File(generatedDir, "viewport"), null);
@@ -97,9 +97,9 @@ public final class OnDeviceSceneEngine {
 
     public SceneBuildResult buildScene(SceneRequest request, ProgressListener listener) throws IOException {
         request.validate(); checkInterrupted(); progress(listener, "cache", 0, 4);
-        Bbox display = Bbox.around(request.latitude, request.longitude, request.radiusM);
-        String key = cacheKey(request, display);
-        Bbox requiredQueryCoverage = display.expand(350);
+        Bbox display = request.displayBounds;
+        String key = cacheKey(display);
+        Bbox requiredQueryCoverage = display.expand(MAX_SHADOW_M);
         CityPackStore.PackSelection pack = cityPackStore == null ? null : cityPackStore.loadBuildings(
             requiredQueryCoverage.south,
             requiredQueryCoverage.west,
@@ -123,7 +123,7 @@ public final class OnDeviceSceneEngine {
                 && rawCacheCovers(raw, requiredQueryCoverage);
             if (!cacheHit) {
                 progress(listener, "download", 1, 4);
-                Bbox cacheQuery = display.expand(350 + GRID_GUARD_M);
+                Bbox cacheQuery = display.expand(MAX_SHADOW_M + GRID_GUARD_M);
                 raw = fetchOverpass(cacheQuery, listener);
                 p(raw, "cacheVersion", CACHE_VERSION);
                 p(raw, "display", display.json());
@@ -137,6 +137,9 @@ public final class OnDeviceSceneEngine {
             buildings = parseBuildings(raw, request.latitude, request.longitude);
         }
         if (buildings.isEmpty()) throw new IOException("No valid building footprints were returned for this area");
+        if (buildings.size() > MAX_SCENE_BUILDINGS) {
+            throw new IOException("Приблизьте карту для расчёта теней: в видимой области слишком много зданий");
+        }
         Projection projection = new Projection(request.latitude, request.longitude);
         List<ProjectedBuilding> projected = new ArrayList<>();
         List<Geometry> ground = new ArrayList<>();
@@ -150,12 +153,9 @@ public final class OnDeviceSceneEngine {
         Geometry groundUnion = safeUnion(ground);
         Geometry clip = GF.toGeometry(new Envelope(
             projection.x(display.west), projection.x(display.east), projection.y(display.south), projection.y(display.north)));
-        WindInfo wind = fetchWind(request.latitude, request.longitude);
         SceneRequest solarRequest = request;
         String sceneId = sceneIdFor(
-            request.latitude,
-            request.longitude,
-            request.radiusM,
+            display,
             solarRequest.localDate,
             solarRequest.timezoneOffsetMinutes,
             request.selectedMinutes,
@@ -166,13 +166,9 @@ public final class OnDeviceSceneEngine {
         int initial = closestFrame(request.selectedMinutes);
         SceneContext context = new SceneContext(sceneId, projection, projected, groundUnion, clip, metas, display);
         progress(listener, "initial-shadow", 3, 4);
-        if (metas.get(initial).altitude > .5) {
-            FramePayload payload = renderFrame(context, initial);
-            metas.get(initial).geometry = payload.geometry;
-            metas.get(initial).polygonCount = payload.polygonCount;
-            metas.get(initial).computed = true;
-        } else metas.get(initial).computed = true;
-        checkInterrupted(); progress(listener, "wind", 4, 4);
+        // The initial payload belongs to this response only, never to the retained scene.
+        FramePayload initialPayload = metas.get(initial).altitude > .5 ? renderFrame(context, initial) : null;
+        checkInterrupted(); progress(listener, "ready", 4, 4);
         List<Building> visible = visibleBuildings(buildings, display);
         if (visible.isEmpty()) throw new IOException("No valid building footprints are visible in this area");
         JSONObject bundle = bundle(
@@ -182,7 +178,8 @@ public final class OnDeviceSceneEngine {
             initial,
             cacheHit,
             dataSource,
-            wind == null ? null : wind.layer
+            null,
+            initialPayload
         );
         String relative = "bundle-" + sceneId + ".json";
         writeAtomic(new File(generatedDir, relative), bundle.toString());
@@ -213,7 +210,6 @@ public final class OnDeviceSceneEngine {
         p(json,"geometry",payload == null ? JSONObject.NULL : payload.geometry); p(json,"polygon_count",payload == null ? 0 : payload.polygonCount); p(json,"computed",true);
         String text = json.toString(); writeAtomic(output, text);
         pruneDirectory(generatedDir, GENERATED_CACHE_BYTES);
-        frame.geometry = payload == null ? null : payload.geometry; frame.polygonCount = payload == null ? 0 : payload.polygonCount; frame.computed = true;
         synchronized (frames) { frames.put(frameKey(sceneId, frameIndex), text); }
         progress(listener, "shadow", 1, 1);
         return new FrameBuildResult(sceneId, frameIndex, relative, false);
@@ -449,11 +445,68 @@ public final class OnDeviceSceneEngine {
     static double[] sunPosition(OffsetDateTime date,double lat,double lon){double rad=Math.PI/180,julian=date.toInstant().toEpochMilli()/86400000d-.5+2440588,n=julian-2451545,ml=normalize(280.46+.9856474*n),ma=normalize(357.528+.9856003*n)*rad,el=(ml+1.915*Math.sin(ma)+.02*Math.sin(2*ma))*rad,ob=(23.439-.0000004*n)*rad,ra=Math.atan2(Math.cos(ob)*Math.sin(el),Math.cos(el)),dec=Math.asin(Math.sin(ob)*Math.sin(el)),gmst=normalize(280.46061837+360.98564736629*(julian-2451545))*rad,hour=gmst+lon*rad-ra,phi=lat*rad,alt=Math.asin(Math.sin(phi)*Math.sin(dec)+Math.cos(phi)*Math.cos(dec)*Math.cos(hour)),azi=Math.atan2(-Math.sin(hour),Math.tan(dec)*Math.cos(phi)-Math.sin(phi)*Math.cos(hour));return new double[]{Math.toDegrees(alt),normalize(Math.toDegrees(azi))};}
     static double normalize(double d){d%=360;return d<0?d+360:d;} static int closestFrame(int min){return min>=1425?48:(int)Math.round(min/30d);}
     private FramePayload renderFrame(SceneContext c,int index){checkInterrupted();FrameMeta f=c.frames.get(index);Geometry shadow=shadow(c.buildings,c.ground,c.clip,f.altitude,f.azimuth,c.projection);JSONObject geo=geometryJson(shadow);return new FramePayload(geo,polygons(shadow).size());}
-    static Geometry shadow(List<ProjectedBuilding> b,Geometry ground,Geometry clip,double altitude,double azimuth,Projection p){if(altitude<=.5)return GF.createGeometryCollection();ArrayList<Geometry> pieces=new ArrayList<>();for(ProjectedBuilding x:b){checkInterrupted();double tangent=Math.tan(Math.toRadians(altitude)),top=Math.min(x.heightM/tangent,MAX_SHADOW_M),base=Math.min(Math.max(0,x.minHeightM)/tangent,top);pieces.addAll(sweep(x.geometry,bearing(top,normalize(azimuth+180)),bearing(base,normalize(azimuth+180))));}Geometry out=safeDifference(safeUnion(pieces),ground);if(clip!=null)out=safeIntersection(out,clip);out=TopologyPreservingSimplifier.simplify(out,.15);ArrayList<Geometry> keep=new ArrayList<>();for(Polygon poly:polygons(out))if(poly.getArea()>=.2)keep.add(poly);return polygonal(unproject(safeUnion(keep),p));}
-    static List<Geometry> sweep(Geometry g,Coordinate top,Coordinate base){ArrayList<Geometry> out=new ArrayList<>();for(Polygon p:polygons(g)){Geometry bottom=translated(p,base),upper=translated(p,top);out.add(bottom);out.add(upper);for(int r=-1;r<p.getNumInteriorRing();r++){LineString ring=r<0?p.getExteriorRing():p.getInteriorRingN(r);Coordinate[] cs=ring.getCoordinates();for(int i=1;i<cs.length;i++)out.add(validPolygon(GF.createPolygon(new Coordinate[]{new Coordinate(cs[i-1].x+base.x,cs[i-1].y+base.y),new Coordinate(cs[i].x+base.x,cs[i].y+base.y),new Coordinate(cs[i].x+top.x,cs[i].y+top.y),new Coordinate(cs[i-1].x+top.x,cs[i-1].y+top.y),new Coordinate(cs[i-1].x+base.x,cs[i-1].y+base.y)})));}}return out;}private static Geometry translated(Geometry g,Coordinate delta){Geometry copy=g.copy();copy.apply(new org.locationtech.jts.geom.CoordinateFilter(){@Override public void filter(Coordinate c){c.x+=delta.x;c.y+=delta.y;}});copy.geometryChanged();return copy;}
+    static Geometry shadow(List<ProjectedBuilding> buildings, Geometry ground, Geometry clip,
+            double altitude, double azimuth, Projection projection) {
+        checkInterrupted();
+        if (altitude <= .5) return GF.createGeometryCollection();
+        ArrayList<Geometry> pieces = new ArrayList<>();
+        double tangent = Math.tan(Math.toRadians(altitude));
+        for (ProjectedBuilding building : buildings) {
+            checkInterrupted();
+            double top = Math.min(building.heightM / tangent, MAX_SHADOW_M);
+            double base = Math.min(Math.max(0, building.minHeightM) / tangent, top);
+            pieces.addAll(sweep(building.geometry, bearing(top, normalize(azimuth + 180)),
+                bearing(base, normalize(azimuth + 180))));
+        }
+        checkInterrupted();
+        Geometry united = safeUnion(pieces);
+        checkInterrupted();
+        Geometry out = safeDifference(united, ground);
+        checkInterrupted();
+        if (clip != null) out = safeIntersection(out, clip);
+        checkInterrupted();
+        out = TopologyPreservingSimplifier.simplify(out, .15);
+        checkInterrupted();
+        ArrayList<Geometry> keep = new ArrayList<>();
+        for (Polygon polygon : polygons(out)) {
+            checkInterrupted();
+            if (polygon.getArea() >= .2) keep.add(polygon);
+        }
+        Geometry result = safeUnion(keep);
+        checkInterrupted();
+        return polygonal(unproject(result, projection));
+    }
+    static List<Geometry> sweep(Geometry geometry, Coordinate top, Coordinate base) {
+        checkInterrupted();
+        ArrayList<Geometry> out = new ArrayList<>();
+        for (Polygon polygon : polygons(geometry)) {
+            checkInterrupted();
+            out.add(translated(polygon, base));
+            out.add(translated(polygon, top));
+            for (int ringIndex = -1; ringIndex < polygon.getNumInteriorRing(); ringIndex++) {
+                checkInterrupted();
+                LineString ring = ringIndex < 0 ? polygon.getExteriorRing() : polygon.getInteriorRingN(ringIndex);
+                Coordinate[] coordinates = ring.getCoordinates();
+                for (int index = 1; index < coordinates.length; index++) {
+                    if ((index & 63) == 1) checkInterrupted();
+                    Coordinate previous = coordinates[index - 1], current = coordinates[index];
+                    out.add(validPolygon(GF.createPolygon(new Coordinate[] {
+                        new Coordinate(previous.x + base.x, previous.y + base.y),
+                        new Coordinate(current.x + base.x, current.y + base.y),
+                        new Coordinate(current.x + top.x, current.y + top.y),
+                        new Coordinate(previous.x + top.x, previous.y + top.y),
+                        new Coordinate(previous.x + base.x, previous.y + base.y)
+                    })));
+                }
+            }
+        }
+        checkInterrupted();
+        return out;
+    }
+    private static Geometry translated(Geometry g,Coordinate delta){Geometry copy=g.copy();copy.apply(new org.locationtech.jts.geom.CoordinateFilter(){@Override public void filter(Coordinate c){c.x+=delta.x;c.y+=delta.y;}});copy.geometryChanged();return copy;}
     static Coordinate bearing(double d,double bearing){double a=Math.toRadians(bearing);return new Coordinate(d*Math.sin(a),d*Math.cos(a));}
 
-    private static JSONObject bundle(SceneRequest r,SceneContext c,List<Building>b,int initial,boolean cacheHit,String dataSource,JSONObject wind){JSONObject root=new JSONObject();p(root,"schemaVersion",1);p(root,"sceneId",c.sceneId);p(root,"cacheHit",cacheHit);JSONObject region=c.display.mapRegion(c.sceneId,r.name,r.latitude,r.longitude);p(root,"region",region);p(root,"buildings",buildingFeatures(b));JSONObject layers=new JSONObject(),shadows=new JSONObject();p(shadows,"initialFrameIndex",initial);p(shadows,"localDate",r.localDate);p(shadows,"timezoneOffsetMinutes",r.timezoneOffsetMinutes);JSONArray fs=new JSONArray();for(FrameMeta f:c.frames)a(fs,f.json());p(shadows,"frames",fs);p(layers,"shadows",shadows);if(wind!=null)p(layers,"wind",wind);p(root,"layers",layers);p(root,"source",dataSource);return root;}
+    private static JSONObject bundle(SceneRequest r,SceneContext c,List<Building>b,int initial,boolean cacheHit,String dataSource,JSONObject wind,FramePayload initialPayload){JSONObject root=new JSONObject();p(root,"schemaVersion",1);p(root,"sceneId",c.sceneId);p(root,"cacheHit",cacheHit);JSONObject region=c.display.mapRegion(c.sceneId,r.name,r.latitude,r.longitude);p(root,"region",region);p(root,"buildings",buildingFeatures(b));JSONObject layers=new JSONObject(),shadows=new JSONObject();p(shadows,"initialFrameIndex",initial);p(shadows,"localDate",r.localDate);p(shadows,"timezoneOffsetMinutes",r.timezoneOffsetMinutes);JSONArray fs=new JSONArray();for(FrameMeta f:c.frames)a(fs,f.json(f.index==initial?initialPayload:null,f.index==initial||f.altitude<=.5));p(shadows,"frames",fs);p(layers,"shadows",shadows);if(wind!=null)p(layers,"wind",wind);p(root,"layers",layers);p(root,"source",dataSource);return root;}
     private static List<Building> visibleBuildings(List<Building> source,Bbox display){Geometry bounds=GF.toGeometry(new Envelope(display.west,display.east,display.south,display.north));ArrayList<Building> visible=new ArrayList<>();for(Building b:source)if(b.geometry.intersects(bounds))visible.add(b);return visible;}private static JSONObject buildingFeatures(List<Building>b){JSONArray fs=new JSONArray();for(Building x:b){JSONObject f=new JSONObject();p(f,"type","Feature");JSONObject properties=new JSONObject();p(properties,"height",x.heightM);p(properties,"min_height",x.minHeightM);p(properties,"height_source",x.heightSource);p(properties,"name",x.name);p(properties,"osm_source",x.source);p(properties,"kind",x.kind);p(f,"properties",properties);p(f,"geometry",geometryJson(x.geometry));a(fs,f);}JSONObject c=new JSONObject();p(c,"type","FeatureCollection");p(c,"features",fs);return c;}
     private static JSONObject emptyGeoJson(){JSONObject o=new JSONObject();p(o,"type","GeometryCollection");p(o,"geometries",new JSONArray());return o;}
     private static JSONObject geometryJson(Geometry g){JSONObject o=new JSONObject();if(g==null||g.isEmpty())return emptyGeoJson();if(g instanceof Polygon){p(o,"type","Polygon");p(o,"coordinates",polygonCoords((Polygon)g));}else if(g instanceof MultiPolygon){p(o,"type","MultiPolygon");JSONArray a=new JSONArray();for(int i=0;i<g.getNumGeometries();i++)a(a,polygonCoords((Polygon)g.getGeometryN(i)));p(o,"coordinates",a);}else{p(o,"type","GeometryCollection");p(o,"geometries",new JSONArray());}return o;}
@@ -491,7 +544,20 @@ public final class OnDeviceSceneEngine {
     }
     static void pruneDirectory(File directory, long quotaBytes) { pruneDirectory(directory, quotaBytes, Collections.<File>emptySet()); }
     static void pruneDirectory(File directory, long quotaBytes, Set<File> pinned) { if(directory==null)return;File[] all=directory.listFiles(File::isFile);if(all==null)return;long staleBefore=System.currentTimeMillis()-STALE_TEMP_MS;for(File file:all)if(file.getName().endsWith(".tmp")&&file.lastModified()<staleBefore)file.delete();File[] candidates=directory.listFiles(file -> file.isFile() && !file.getName().endsWith(".tmp"));if(candidates==null)return;long size=0;for(File file:candidates)size+=Math.max(0,file.length());if(size<=quotaBytes)return;Arrays.sort(candidates,Comparator.comparingLong(File::lastModified));for(File file:candidates){if(size<=quotaBytes)break;if(pinned!=null&&pinned.contains(file))continue;long length=Math.max(0,file.length());if(file.delete())size-=length;} }
-    private static File requireDirectory(File f,String n){if(f==null)throw new IllegalArgumentException(n+" is required");if(!f.exists()&&!f.mkdirs())throw new IllegalArgumentException("Cannot create "+n);if(!f.isDirectory())throw new IllegalArgumentException(n+" is not a directory");return f;}private static void writeAtomic(File f,String text)throws IOException{File t=new File(f.getParentFile(),f.getName()+".tmp");try(FileOutputStream o=new FileOutputStream(t)){o.write(text.getBytes(StandardCharsets.UTF_8));o.getFD().sync();}if(!t.renameTo(f)){if(!f.delete()||!t.renameTo(f))throw new IOException("Cannot atomically replace "+f);}}private static void writeAtomicLimited(File f,String text,int maxBytes)throws IOException{byte[]bytes=text.getBytes(StandardCharsets.UTF_8);if(bytes.length>maxBytes)throw new ViewportException("TOO_DENSE","Viewport tile JSON exceeds the "+maxBytes+" byte safety limit");File t=new File(f.getParentFile(),f.getName()+".tmp");try(FileOutputStream o=new FileOutputStream(t)){o.write(bytes);o.getFD().sync();}if(!t.renameTo(f)){if(!f.delete()||!t.renameTo(f))throw new IOException("Cannot atomically replace "+f);}}private static JSONObject readJson(File f){return readJson(f,MAX_RESPONSE_BYTES);}private static JSONObject readJson(File f,int max){try{return f.isFile()?new JSONObject(readText(f,max)):null;}catch(Exception e){return null;}}private static String readText(File f,int max)throws IOException{try(FileInputStream i=new FileInputStream(f)){return readLimited(i,max);}}private static String readLimited(java.io.InputStream in,int max)throws IOException{BufferedInputStream b=new BufferedInputStream(in);byte[] buf=new byte[8192];int n,total=0;java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();while((n=b.read(buf))!=-1){checkInterrupted();total+=n;if(total>max)throw new IOException("Response exceeds "+max+" bytes");out.write(buf,0,n);}return out.toString("UTF-8");}private static String readLimited(java.io.InputStream in,int max,ProgressListener listener,int expectedTotal)throws IOException{BufferedInputStream b=new BufferedInputStream(in);byte[] buf=new byte[8192];int n,total=0,next=0;java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();progress(listener,"download-bytes",0,expectedTotal);while((n=b.read(buf))!=-1){checkInterrupted();total+=n;if(total>max)throw new IOException("Response exceeds "+max+" bytes");out.write(buf,0,n);if(total>=next){progress(listener,"download-bytes",total,expectedTotal);next=total+256*1024;}}progress(listener,"download-bytes",total,expectedTotal);return out.toString("UTF-8");}private static JSONObject p(JSONObject o,String key,Object value){try{o.put(key,value);return o;}catch(Exception e){throw new IllegalStateException("JSON write failed",e);}}private static JSONArray a(JSONArray array,Object value){try{array.put(value);return array;}catch(Exception e){throw new IllegalStateException("JSON write failed",e);}}static String cacheKey(double latitude,double longitude,int radiusM){long latGrid=(long)Math.floor((latitude+90d)*(Math.PI*EARTH_RADIUS_M/180d)/125d);double lonMeters=(longitude+180d)*(Math.PI*EARTH_RADIUS_M/180d)*Math.max(1e-6,Math.cos(Math.toRadians(latitude)));long lonGrid=(long)Math.floor(lonMeters/125d);return latGrid+"-"+lonGrid+"-"+radiusM;}private static String cacheKey(SceneRequest r,Bbox b){return cacheKey(r.latitude,r.longitude,r.radiusM);}static String sceneIdFor(double latitude,double longitude,int radiusM,String localDate,int utcOffsetMinutes,int selectedMinutes,String source,String revision){return "s-"+shortHash("v"+SCENE_ID_VERSION+"|"+String.format(Locale.US,"%.7f|%.7f|%d|",latitude,longitude,radiusM)+localDate+"|"+utcOffsetMinutes+"|"+selectedMinutes+"|"+source+"|"+revision);}private static String shortHash(String value){try{byte[]d=MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));StringBuilder s=new StringBuilder();for(int i=0;i<8;i++)s.append(String.format(Locale.US,"%02x",d[i]));return s.toString();}catch(Exception e){throw new IllegalStateException(e);}}static boolean ownsViewportFeature(ViewportTile tile,Geometry geometry){if(tile==null||geometry==null||geometry.isEmpty())return false;tile.validate();Geometry representative=geometry.getInteriorPoint();Coordinate point=representative==null?null:representative.getCoordinate();if(point==null||!Double.isFinite(point.x)||!Double.isFinite(point.y))return false;int width=1<<tile.z;double xFraction=(point.x+180d)/360d;double tan=Math.tan(Math.toRadians(point.y));double yFraction=(1d-Math.log(tan+Math.sqrt(tan*tan+1d))/Math.PI)/2d;if(!Double.isFinite(xFraction)||!Double.isFinite(yFraction)||xFraction<0d||xFraction>1d||yFraction<0d||yFraction>1d)return false;int ownerX=Math.min(width-1,(int)Math.floor(xFraction*width));int ownerY=Math.min(width-1,(int)Math.floor(yFraction*width));return tile.x==ownerX&&tile.y==ownerY;}static Bbox tileBounds(int z,int x,int y){ViewportTile tile=new ViewportTile(z,x,y);tile.validate();double n=1L<<z;double west=x/n*360d-180d,east=(x+1d)/n*360d-180d;double north=Math.toDegrees(Math.atan(Math.sinh(Math.PI*(1d-2d*y/n))));double south=Math.toDegrees(Math.atan(Math.sinh(Math.PI*(1d-2d*(y+1d)/n))));return new Bbox(south,west,north,east);}static String viewportCacheFileName(String revision,ViewportTile tile){tile.validate();String safe=(revision==null?"unknown":revision).replaceAll("[^A-Za-z0-9._-]","_");if(safe.length()>96)safe=safe.substring(0,72)+"-"+shortHash(revision);return "viewport-v"+VIEWPORT_FORMAT_VERSION+"-r"+safe+"-"+tile.id().replace('/','-')+".json";}private static boolean isViewportCache(JSONObject root,String revision,ViewportTile tile){if(root==null||root.optInt("schemaVersion",-1)!=VIEWPORT_FORMAT_VERSION)return false;JSONObject cachedTile=root.optJSONObject("tile"),pack=root.optJSONObject("pack");return cachedTile!=null&&pack!=null&&tile.id().equals(cachedTile.optString("id"))&&revision.equals(pack.optString("revision"));}private static String frameKey(String scene,int index){return scene+":"+index;}private static String messageOf(Throwable error){String text=error==null?"":error.getMessage();return text==null||text.trim().isEmpty()?error.getClass().getSimpleName():text;}private static void progress(ProgressListener l,String stage,int now,int total){if(l!=null)l.onProgress(stage,now,total);}private static void checkInterrupted(){if(Thread.currentThread().isInterrupted())throw new CancelledException();}
+    private static File requireDirectory(File f,String n){if(f==null)throw new IllegalArgumentException(n+" is required");if(!f.exists()&&!f.mkdirs())throw new IllegalArgumentException("Cannot create "+n);if(!f.isDirectory())throw new IllegalArgumentException(n+" is not a directory");return f;}private static void writeAtomic(File f,String text)throws IOException{File t=new File(f.getParentFile(),f.getName()+".tmp");try(FileOutputStream o=new FileOutputStream(t)){o.write(text.getBytes(StandardCharsets.UTF_8));o.getFD().sync();}if(!t.renameTo(f)){if(!f.delete()||!t.renameTo(f))throw new IOException("Cannot atomically replace "+f);}}private static void writeAtomicLimited(File f,String text,int maxBytes)throws IOException{byte[]bytes=text.getBytes(StandardCharsets.UTF_8);if(bytes.length>maxBytes)throw new ViewportException("TOO_DENSE","Viewport tile JSON exceeds the "+maxBytes+" byte safety limit");File t=new File(f.getParentFile(),f.getName()+".tmp");try(FileOutputStream o=new FileOutputStream(t)){o.write(bytes);o.getFD().sync();}if(!t.renameTo(f)){if(!f.delete()||!t.renameTo(f))throw new IOException("Cannot atomically replace "+f);}}private static JSONObject readJson(File f){return readJson(f,MAX_RESPONSE_BYTES);}private static JSONObject readJson(File f,int max){try{return f.isFile()?new JSONObject(readText(f,max)):null;}catch(Exception e){return null;}}private static String readText(File f,int max)throws IOException{try(FileInputStream i=new FileInputStream(f)){return readLimited(i,max);}}private static String readLimited(java.io.InputStream in,int max)throws IOException{BufferedInputStream b=new BufferedInputStream(in);byte[] buf=new byte[8192];int n,total=0;java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();while((n=b.read(buf))!=-1){checkInterrupted();total+=n;if(total>max)throw new IOException("Response exceeds "+max+" bytes");out.write(buf,0,n);}return out.toString("UTF-8");}private static String readLimited(java.io.InputStream in,int max,ProgressListener listener,int expectedTotal)throws IOException{BufferedInputStream b=new BufferedInputStream(in);byte[] buf=new byte[8192];int n,total=0,next=0;java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();progress(listener,"download-bytes",0,expectedTotal);while((n=b.read(buf))!=-1){checkInterrupted();total+=n;if(total>max)throw new IOException("Response exceeds "+max+" bytes");out.write(buf,0,n);if(total>=next){progress(listener,"download-bytes",total,expectedTotal);next=total+256*1024;}}progress(listener,"download-bytes",total,expectedTotal);return out.toString("UTF-8");}private static JSONObject p(JSONObject o,String key,Object value){try{o.put(key,value);return o;}catch(Exception e){throw new IllegalStateException("JSON write failed",e);}}private static JSONArray a(JSONArray array,Object value){try{array.put(value);return array;}catch(Exception e){throw new IllegalStateException("JSON write failed",e);}}static String cacheKey(Bbox bounds) {
+        return "bounds-" + shortHash(boundsIdentity(bounds));
+    }
+    private static String boundsIdentity(Bbox bounds) {
+        // Exact coordinates avoid sharing a clipped result with a different viewport.
+        return Double.toHexString(bounds.west) + "|" + Double.toHexString(bounds.south)
+            + "|" + Double.toHexString(bounds.east) + "|" + Double.toHexString(bounds.north);
+    }
+    static String sceneIdFor(Bbox bounds, String localDate, int utcOffsetMinutes,
+            int selectedMinutes, String source, String revision) {
+        return "s-" + shortHash("v" + SCENE_ID_VERSION + "|" + boundsIdentity(bounds) + "|"
+            + localDate + "|" + utcOffsetMinutes + "|" + selectedMinutes + "|" + source + "|" + revision);
+    }
+    private static String shortHash(String value){try{byte[]d=MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));StringBuilder s=new StringBuilder();for(int i=0;i<8;i++)s.append(String.format(Locale.US,"%02x",d[i]));return s.toString();}catch(Exception e){throw new IllegalStateException(e);}}static boolean ownsViewportFeature(ViewportTile tile,Geometry geometry){if(tile==null||geometry==null||geometry.isEmpty())return false;tile.validate();Geometry representative=geometry.getInteriorPoint();Coordinate point=representative==null?null:representative.getCoordinate();if(point==null||!Double.isFinite(point.x)||!Double.isFinite(point.y))return false;int width=1<<tile.z;double xFraction=(point.x+180d)/360d;double tan=Math.tan(Math.toRadians(point.y));double yFraction=(1d-Math.log(tan+Math.sqrt(tan*tan+1d))/Math.PI)/2d;if(!Double.isFinite(xFraction)||!Double.isFinite(yFraction)||xFraction<0d||xFraction>1d||yFraction<0d||yFraction>1d)return false;int ownerX=Math.min(width-1,(int)Math.floor(xFraction*width));int ownerY=Math.min(width-1,(int)Math.floor(yFraction*width));return tile.x==ownerX&&tile.y==ownerY;}static Bbox tileBounds(int z,int x,int y){ViewportTile tile=new ViewportTile(z,x,y);tile.validate();double n=1L<<z;double west=x/n*360d-180d,east=(x+1d)/n*360d-180d;double north=Math.toDegrees(Math.atan(Math.sinh(Math.PI*(1d-2d*y/n))));double south=Math.toDegrees(Math.atan(Math.sinh(Math.PI*(1d-2d*(y+1d)/n))));return new Bbox(south,west,north,east);}static String viewportCacheFileName(String revision,ViewportTile tile){tile.validate();String safe=(revision==null?"unknown":revision).replaceAll("[^A-Za-z0-9._-]","_");if(safe.length()>96)safe=safe.substring(0,72)+"-"+shortHash(revision);return "viewport-v"+VIEWPORT_FORMAT_VERSION+"-r"+safe+"-"+tile.id().replace('/','-')+".json";}private static boolean isViewportCache(JSONObject root,String revision,ViewportTile tile){if(root==null||root.optInt("schemaVersion",-1)!=VIEWPORT_FORMAT_VERSION)return false;JSONObject cachedTile=root.optJSONObject("tile"),pack=root.optJSONObject("pack");return cachedTile!=null&&pack!=null&&tile.id().equals(cachedTile.optString("id"))&&revision.equals(pack.optString("revision"));}private static String frameKey(String scene,int index){return scene+":"+index;}private static String messageOf(Throwable error){String text=error==null?"":error.getMessage();return text==null||text.trim().isEmpty()?error.getClass().getSimpleName():text;}private static void progress(ProgressListener l,String stage,int now,int total){if(l!=null)l.onProgress(stage,now,total);}private static void checkInterrupted(){if(Thread.currentThread().isInterrupted())throw new CancelledException();}
 
     public interface ProgressListener { void onProgress(String stage, int current, int total); }
     public static final class ViewportRequest {
@@ -525,10 +591,115 @@ public final class OnDeviceSceneEngine {
         public final String code;
         ViewportException(String code,String message){super(message);this.code=code;}
     }
-    public static final class SceneRequest {public final String requestId,name,localDate;public final double latitude,longitude;public final int radiusM,timezoneOffsetMinutes,selectedMinutes;SceneRequest(String id,double lat,double lon,int radius,String date,int offset,int selected,String name){requestId=id;latitude=lat;longitude=lon;radiusM=radius;localDate=date;timezoneOffsetMinutes=offset;selectedMinutes=selected;this.name=name;}public static SceneRequest fromJson(String json){try{JSONObject o=new JSONObject(json);SceneRequest r=new SceneRequest(o.optString("requestId",""),o.getDouble("latitude"),o.getDouble("longitude"),o.getInt("radiusM"),o.getString("localDate"),o.getInt("timezoneOffsetMinutes"),o.getInt("selectedMinutes"),o.optString("name",""));r.validate();return r;}catch(org.json.JSONException e){throw new IllegalArgumentException("Invalid scene request JSON",e);}}void validate(){if(!Double.isFinite(latitude)||!Double.isFinite(longitude)||latitude<-90||latitude>90||longitude<-180||longitude>180)throw new IllegalArgumentException("Invalid coordinates");if(radiusM<150||radiusM>550)throw new IllegalArgumentException("radiusM must be 150..550");if(timezoneOffsetMinutes<-720||timezoneOffsetMinutes>840)throw new IllegalArgumentException("Invalid timezone offset");if(selectedMinutes<0||selectedMinutes>1439)throw new IllegalArgumentException("Invalid selectedMinutes");if(name.length()>120)throw new IllegalArgumentException("name too long");try{LocalDate.parse(localDate);}catch(Exception e){throw new IllegalArgumentException("localDate must be YYYY-MM-DD",e);}}OffsetDateTime at(int minutes){return LocalDate.parse(localDate).atStartOfDay().atOffset(ZoneOffset.ofTotalSeconds(timezoneOffsetMinutes*60)).plusMinutes(minutes);}}
+    public static final class SceneRequest {
+        private static final double MAX_SPAN_M = 6000;
+        private static final double MAX_AREA_M2 = 12_000_000;
+        public final String requestId, name, localDate;
+        public final Bbox displayBounds;
+        public final double latitude, longitude;
+        public final int timezoneOffsetMinutes, selectedMinutes;
+
+        SceneRequest(String id, Bbox bounds, String date, int offset, int selected, String name) {
+            requestId = id;
+            displayBounds = bounds;
+            latitude = bounds == null ? Double.NaN : (bounds.south + bounds.north) / 2;
+            longitude = bounds == null ? Double.NaN : (bounds.west + bounds.east) / 2;
+            localDate = date;
+            timezoneOffsetMinutes = offset;
+            selectedMinutes = selected;
+            this.name = name == null ? "" : name;
+        }
+
+        public static SceneRequest fromJson(String json) {
+            try {
+                JSONObject input = new JSONObject(json);
+                JSONArray bounds = input.getJSONArray("displayBounds");
+                if (bounds.length() != 2 || bounds.getJSONArray(0).length() != 2
+                        || bounds.getJSONArray(1).length() != 2) {
+                    throw new IllegalArgumentException("displayBounds must contain southwest and northeast coordinates");
+                }
+                JSONArray southwest = bounds.getJSONArray(0), northeast = bounds.getJSONArray(1);
+                SceneRequest request = new SceneRequest(input.optString("requestId", ""),
+                    new Bbox(southwest.getDouble(1), southwest.getDouble(0),
+                        northeast.getDouble(1), northeast.getDouble(0)),
+                    input.getString("localDate"), input.getInt("timezoneOffsetMinutes"),
+                    input.getInt("selectedMinutes"), input.optString("name", ""));
+                request.validate();
+                return request;
+            } catch (org.json.JSONException error) {
+                throw new IllegalArgumentException("Invalid scene request: displayBounds and solar time are required", error);
+            }
+        }
+
+        void validate() {
+            if (requestId == null || requestId.trim().isEmpty() || requestId.length() > 160) {
+                throw new IllegalArgumentException("requestId must be non-empty and at most 160 characters");
+            }
+            if (displayBounds == null || !Double.isFinite(displayBounds.south)
+                    || !Double.isFinite(displayBounds.north) || !Double.isFinite(displayBounds.west)
+                    || !Double.isFinite(displayBounds.east) || displayBounds.south < -85
+                    || displayBounds.north > 85 || displayBounds.west < -180 || displayBounds.east > 180
+                    || displayBounds.south >= displayBounds.north || displayBounds.west >= displayBounds.east) {
+                throw new IllegalArgumentException("Invalid displayBounds: a finite non-wrapping viewport is required");
+            }
+            // Work budgets reject an oversized viewport before any query, never crop it.
+            double radiansPerDegree = Math.PI / 180;
+            double closestLatitudeToEquator = displayBounds.south <= 0 && displayBounds.north >= 0 ? 0
+                : Math.min(Math.abs(displayBounds.south), Math.abs(displayBounds.north));
+            double widthM = (displayBounds.east - displayBounds.west) * radiansPerDegree * EARTH_RADIUS_M
+                * Math.cos(closestLatitudeToEquator * radiansPerDegree);
+            double heightM = (displayBounds.north - displayBounds.south) * radiansPerDegree * EARTH_RADIUS_M;
+            if (widthM > MAX_SPAN_M || heightM > MAX_SPAN_M || widthM * heightM > MAX_AREA_M2) {
+                throw new IllegalArgumentException("Приблизьте карту для расчёта теней: видимая область слишком велика");
+            }
+            if (timezoneOffsetMinutes < -720 || timezoneOffsetMinutes > 840) {
+                throw new IllegalArgumentException("Invalid timezone offset");
+            }
+            if (selectedMinutes < 0 || selectedMinutes > 1439) throw new IllegalArgumentException("Invalid selectedMinutes");
+            if (name.length() > 120) throw new IllegalArgumentException("name too long");
+            try { LocalDate.parse(localDate); }
+            catch (Exception error) { throw new IllegalArgumentException("localDate must be YYYY-MM-DD", error); }
+        }
+
+        OffsetDateTime at(int minutes) {
+            return LocalDate.parse(localDate).atStartOfDay()
+                .atOffset(ZoneOffset.ofTotalSeconds(timezoneOffsetMinutes * 60)).plusMinutes(minutes);
+        }
+    }
     public static final class SceneBuildResult {public final String sceneId,file;public final int initialFrameIndex,buildingCount;public final boolean cacheHit;SceneBuildResult(String s,String f,int i,boolean h,int n){sceneId=s;file=f;initialFrameIndex=i;cacheHit=h;buildingCount=n;}}
     static final class HttpStatusException extends IOException {final int statusCode;final String body,retryAfter;HttpStatusException(int code,String detail,String retry){super("HTTP "+code);statusCode=code;body=detail==null?"":detail;retryAfter=retry;}String describe(){String compact=body.replaceAll("\\s+"," ").trim();if(compact.length()>512)compact=compact.substring(0,512);return (compact.isEmpty()?"HTTP "+statusCode:compact)+(retryAfter==null||retryAfter.trim().isEmpty()?"":"; Retry-After="+retryAfter.trim());}}
     public static final class FrameBuildResult {public final String sceneId,file;public final int frameIndex;public final boolean cacheHit;FrameBuildResult(String s,int i,String f,boolean h){sceneId=s;frameIndex=i;file=f;cacheHit=h;}}
+    /** Retains only small recent response strings; large responses remain available on disk. */
+    static final class FrameTextCache {
+        private final long maxBytes;
+        private final int maxEntries;
+        private long retainedBytes;
+        private final LinkedHashMap<String, String> values = new LinkedHashMap<>(8, .75f, true);
+        FrameTextCache(long maxBytes, int maxEntries) {
+            if (maxBytes < 0 || maxEntries < 0) throw new IllegalArgumentException("Invalid frame cache budget");
+            this.maxBytes = maxBytes;
+            this.maxEntries = maxEntries;
+        }
+        static long entryBytes(String key, String value) { return 2L * (key.length() + (long) value.length()) + 96L; }
+        synchronized String get(String key) { return values.get(key); }
+        synchronized void put(String key, String value) {
+            String previous = values.remove(key);
+            if (previous != null) retainedBytes -= entryBytes(key, previous);
+            long bytes = entryBytes(key, value);
+            if (bytes > maxBytes || maxEntries == 0) return;
+            while (!values.isEmpty() && (retainedBytes + bytes > maxBytes || values.size() >= maxEntries)) {
+                Map.Entry<String, String> eldest = values.entrySet().iterator().next();
+                retainedBytes -= entryBytes(eldest.getKey(), eldest.getValue());
+                values.remove(eldest.getKey());
+            }
+            values.put(key, value);
+            retainedBytes += bytes;
+        }
+        synchronized void clear() { values.clear(); retainedBytes = 0; }
+        synchronized long retainedBytes() { return retainedBytes; }
+        synchronized int size() { return values.size(); }
+    }
+
     static final class PinnedLruCache<V> {
         private final int candidateLimit;
         private final LinkedHashMap<String,V> values = new LinkedHashMap<String,V>(4,.75f,true);
@@ -542,5 +713,11 @@ public final class OnDeviceSceneEngine {
         synchronized boolean contains(String id){return values.containsKey(id);}
         private void trim(){int allowed=candidateLimit+(acceptedId==null?0:1);while(values.size()>allowed){String victim=null;for(String id:values.keySet())if(!id.equals(acceptedId)){victim=id;break;}if(victim==null)return;values.remove(victim);}}
     }
-    static final class Height {final double height,minHeight;final String source;Height(double h,double m,String s){height=h;minHeight=m;source=s;}}static final class Building {final Geometry geometry;final double heightM,minHeightM;final String heightSource,name,source,kind;Building(Geometry g,double h,double m,String hs,String n,String s,String k){geometry=g;heightM=h;minHeightM=m;heightSource=hs;name=n;source=s;kind=k;}}static final class ProjectedBuilding {final Geometry geometry;final double heightM,minHeightM;ProjectedBuilding(Geometry g,double h,double m){geometry=g;heightM=h;minHeightM=m;}}static final class SceneContext {final String sceneId;final Projection projection;final List<ProjectedBuilding>buildings;final Geometry ground,clip;final List<FrameMeta>frames;final Bbox display;SceneContext(String i,Projection p,List<ProjectedBuilding>b,Geometry g,Geometry c,List<FrameMeta>f,Bbox d){sceneId=i;projection=p;buildings=b;ground=g;clip=c;frames=f;display=d;}}static final class FrameMeta {final int index,minutes;final String time,label;final double altitude,azimuth;boolean computed;JSONObject geometry;int polygonCount;FrameMeta(int i,int m,String t,String l,double a,double z){index=i;minutes=m;time=t;label=l;altitude=a;azimuth=z;}JSONObject json(){JSONObject o=new JSONObject();p(o,"time",time);p(o,"label",label);p(o,"altitude",round(altitude));p(o,"azimuth",round(azimuth));p(o,"shadow_bearing",round(normalize(azimuth+180)));p(o,"computed",computed);p(o,"geometry",geometry==null?JSONObject.NULL:geometry);p(o,"polygon_count",polygonCount);return o;}}static final class FramePayload {final JSONObject geometry;final int polygonCount;FramePayload(JSONObject g,int p){geometry=g;polygonCount=p;}}static final class WindInfo {final JSONObject layer;final String localDate;final int utcOffsetMinutes;WindInfo(JSONObject value,String date,int offset){layer=value;localDate=date;utcOffsetMinutes=offset;}}static final class Bbox {final double south,west,north,east;Bbox(double s,double w,double n,double e){south=s;west=w;north=n;east=e;}static Bbox around(double lat,double lon,double r){Projection p=new Projection(lat,lon);return new Bbox(lat-r/p.latScale,lon-r/p.lonScale,lat+r/p.latScale,lon+r/p.lonScale);}Bbox expand(double m){double lat=(south+north)/2;Projection p=new Projection(lat,(west+east)/2);return new Bbox(south-m/p.latScale,west-m/p.lonScale,north+m/p.latScale,east+m/p.lonScale);}JSONObject json(){JSONObject o=new JSONObject();p(o,"south",south);p(o,"west",west);p(o,"north",north);p(o,"east",east);return o;}JSONObject mapRegion(String id,String name,double lat,double lon){JSONObject o=new JSONObject();p(o,"id",id);p(o,"name",name==null||name.trim().isEmpty()?"Выбранный район":name.trim());JSONArray center=new JSONArray();a(center,lon);a(center,lat);p(o,"center",center);JSONArray bounds=new JSONArray();JSONArray sw=new JSONArray();a(sw,west);a(sw,south);JSONArray ne=new JSONArray();a(ne,east);a(bounds,sw);a(bounds,ne);p(o,"bounds",bounds);return o;}}static final class CancelledException extends RuntimeException {CancelledException(){super("Scene calculation cancelled");}}
+    static final class Height {final double height,minHeight;final String source;Height(double h,double m,String s){height=h;minHeight=m;source=s;}}static final class Building {final Geometry geometry;final double heightM,minHeightM;final String heightSource,name,source,kind;Building(Geometry g,double h,double m,String hs,String n,String s,String k){geometry=g;heightM=h;minHeightM=m;heightSource=hs;name=n;source=s;kind=k;}}static final class ProjectedBuilding {final Geometry geometry;final double heightM,minHeightM;ProjectedBuilding(Geometry g,double h,double m){geometry=g;heightM=h;minHeightM=m;}}static final class SceneContext {final String sceneId;final Projection projection;final List<ProjectedBuilding>buildings;final Geometry ground,clip;final List<FrameMeta>frames;final Bbox display;SceneContext(String i,Projection p,List<ProjectedBuilding>b,Geometry g,Geometry c,List<FrameMeta>f,Bbox d){sceneId=i;projection=p;buildings=b;ground=g;clip=c;frames=f;display=d;}}static final class FrameMeta {
+        final int index, minutes;
+        final String time, label;
+        final double altitude, azimuth;
+        FrameMeta(int i,int m,String t,String l,double a,double z){index=i;minutes=m;time=t;label=l;altitude=a;azimuth=z;}
+        JSONObject json(FramePayload payload,boolean computed){JSONObject o=new JSONObject();p(o,"time",time);p(o,"label",label);p(o,"altitude",round(altitude));p(o,"azimuth",round(azimuth));p(o,"shadow_bearing",round(normalize(azimuth+180)));p(o,"computed",computed);p(o,"geometry",payload==null?JSONObject.NULL:payload.geometry);p(o,"polygon_count",payload==null?0:payload.polygonCount);return o;}
+    }static final class FramePayload {final JSONObject geometry;final int polygonCount;FramePayload(JSONObject g,int p){geometry=g;polygonCount=p;}}static final class WindInfo {final JSONObject layer;final String localDate;final int utcOffsetMinutes;WindInfo(JSONObject value,String date,int offset){layer=value;localDate=date;utcOffsetMinutes=offset;}}public static final class Bbox {public final double south,west,north,east;public Bbox(double s,double w,double n,double e){south=s;west=w;north=n;east=e;}static Bbox around(double lat,double lon,double r){Projection p=new Projection(lat,lon);return new Bbox(lat-r/p.latScale,lon-r/p.lonScale,lat+r/p.latScale,lon+r/p.lonScale);}Bbox expand(double m){double lat=(south+north)/2;Projection p=new Projection(lat,(west+east)/2);return new Bbox(south-m/p.latScale,west-m/p.lonScale,north+m/p.latScale,east+m/p.lonScale);}JSONObject json(){JSONObject o=new JSONObject();p(o,"south",south);p(o,"west",west);p(o,"north",north);p(o,"east",east);return o;}JSONObject mapRegion(String id,String name,double lat,double lon){JSONObject o=new JSONObject();p(o,"id",id);p(o,"name",name==null||name.trim().isEmpty()?"Выбранный район":name.trim());JSONArray center=new JSONArray();a(center,lon);a(center,lat);p(o,"center",center);JSONArray bounds=new JSONArray();JSONArray sw=new JSONArray();a(sw,west);a(sw,south);JSONArray ne=new JSONArray();a(ne,east);a(ne,north);a(bounds,sw);a(bounds,ne);p(o,"bounds",bounds);return o;}}static final class CancelledException extends RuntimeException {CancelledException(){super("Scene calculation cancelled");}}
 }

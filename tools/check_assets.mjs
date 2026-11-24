@@ -52,6 +52,29 @@ for (const relative of [
   "vendor/maplibre-gl.css",
   "vendor/maplibre-gl.js",
   "map-data.js",
+  "map-camera.js",
+  "map-gestures.js",
+  "shadow-viewport.js",
+  "basemap.js",
+  "offline-basemap.js",
+  "search-controller.js",
+  "place-names.js",
+  "module-host.js",
+  "extension-storage.js",
+  "vehicle-markers.js",
+  "modules/bundled.js",
+  "modules/live-transport.js",
+  "modules/metro.js",
+  "modules/metro-spb.json",
+  "modules/bus-stops.js",
+  "modules/bus-stops-spb.json",
+  "transport-presets.js",
+  "transport-ui.js",
+  "transport.css",
+  "modules/native-shadows.js",
+  "modules/routing.js",
+  "routing-ui.js",
+  "animated-disclosure.js",
   "layer-settings.js",
   "layer-runtime.js",
   "layer-library.js",
@@ -63,6 +86,9 @@ for (const relative of [
   }
   if (relative.endsWith(".js")) {
     new vm.Script(fs.readFileSync(path.join(assets, relative), "utf8"), { filename: relative });
+    if (relative !== "map-data.js" && !html.includes(`src="${relative}"`)) {
+      throw new Error(`Required runtime script is not loaded by index.html: ${relative}`);
+    }
   }
 }
 
@@ -72,8 +98,11 @@ for (const marker of [
   "AndroidHost",
   "на устройстве",
   'androidHost("requestScene")',
-  'androidHost("searchPlaces")',
-  "Офлайн-города",
+  "window.AndroidHost.searchPlaces(JSON.stringify(",
+  "window.SloiSearch.create(",
+  "function loadViewportScene(",
+  "displayBounds,",
+  'id="offline-basemap"',
   'id="city-pack-list"',
   'androidHost("listCityPacks")',
   'androidHost("downloadCityPack")',
@@ -170,8 +199,9 @@ for (const marker of [
   }
 }
 
-if (!manifestSource.includes("android.permission.ACCESS_COARSE_LOCATION")) {
-  throw new Error("Android manifest is missing approximate location permission");
+if (!manifestSource.includes("android.permission.ACCESS_COARSE_LOCATION")
+  || !manifestSource.includes("android.permission.ACCESS_FINE_LOCATION")) {
+  throw new Error("Android manifest is missing the precise/approximate location choice");
 }
 
 console.log(
