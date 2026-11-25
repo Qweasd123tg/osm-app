@@ -50,6 +50,7 @@
       this.storage = options.storage;
       this.onChange = typeof options.onChange === "function" ? options.onChange : () => {};
       this.anchor = options.anchor || "selected-location";
+      this.vehicleAnchor = options.vehicleAnchor || this.anchor;
       const services = options.services || {};
       if (!services || typeof services !== "object" || Array.isArray(services)
         || Object.keys(services).some((key) => key !== "shadows" || typeof services[key] !== "function")) {
@@ -237,10 +238,11 @@
         const font = style === "vehicle" ? "700 12px sans-serif" : "600 12px sans-serif";
         context.font = font;
         const width = Math.min(250, Math.max(style === "vehicle" ? 16 : 20, Math.ceil(context.measureText(text).width) + (style === "vehicle" ? 8 : 10))), height = style === "vehicle" ? 15 : 21;
-        canvas.width = width * 2; canvas.height = height * 2;
-        context.scale(2, 2); context.font = font;
+        const pixelRatio = style === "vehicle" ? (root.SloiVehicleMarkers?.pixelRatio || 2) : 2;
+        canvas.width = width * pixelRatio; canvas.height = height * pixelRatio;
+        context.scale(pixelRatio, pixelRatio); context.font = font;
         if (style !== "text") {
-          context.fillStyle = style === "vehicle" ? "rgba(255,255,255,.98)" : "rgba(255,255,255,.94)";
+          context.fillStyle = style === "vehicle" ? "#ffffff" : "rgba(255,255,255,.94)";
           context.beginPath();
           const radius = style === "vehicle" ? 3 : 4;
           context.moveTo(radius, 0); context.lineTo(width - radius, 0); context.quadraticCurveTo(width, 0, width, radius);
@@ -255,7 +257,7 @@
           context.strokeText(text, width / 2, height / 2 + .5, width - 8);
         }
         context.fillText(text, width / 2, height / 2 + .5, width - 8);
-        this.map.addImage(id, context.getImageData(0, 0, canvas.width, canvas.height), { pixelRatio: 2 });
+        this.map.addImage(id, context.getImageData(0, 0, canvas.width, canvas.height), { pixelRatio });
         session.labelImages.set(cacheKey, id);
         // Layer/source cleanups run first, then the now-unreferenced badges.
         if (!session.labelCleanup) {
@@ -524,8 +526,10 @@
                 });
               }
               record.rasterLabels = rasterLabels;
+              const before = this.map.getLayer(this.anchor) ? this.anchor : undefined;
+              const beforeVehicle = vehicleMarkers && this.map.getLayer(this.vehicleAnchor) ? this.vehicleAnchor : before;
               for (const spec of specs) {
-                this.map.addLayer(spec, this.map.getLayer(this.anchor) ? this.anchor : undefined);
+                this.map.addLayer(spec, vehicleMarkers && spec.type === "symbol" ? beforeVehicle : before);
                 record.ownedLayers.push({ id: spec.id, layer: this.map.getLayer(spec.id) });
               }
             } catch (error) { this.fail(entry, session, error); throw error; }

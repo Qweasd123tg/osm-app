@@ -98,7 +98,9 @@ def main():
             page.goto(origin)
             wait_for_map(page)
             load_demo(page)
-            assert page.locator("#active-count").inner_text() == "1"
+            # A fresh profile also enables the bundled stops layer.
+            page.wait_for_function("moduleHost.get('spb-stops').status === 'ready'")
+            assert page.locator("#active-count").inner_text() == "2"
             assert page.locator("#layers-sheet").evaluate("node => node.inert")
             open_panel(page)
             assert page.locator("#map").evaluate("node => node.inert")
@@ -113,9 +115,9 @@ def main():
             assert page.evaluate("[map.getBearing(), map.getPitch()]") == camera_before_style
             page.locator("#confidence-toggle").check()
             assert page.locator("#height-legend").is_visible()
-            assert page.locator("#active-count").inner_text() == "1"
+            assert page.locator("#active-count").inner_text() == "2"
             page.locator("#building-toggle").uncheck(force=True)
-            assert page.locator("#active-count").inner_text() == "0"
+            assert page.locator("#active-count").inner_text() == "1"
             assert page.locator("#confidence-toggle").is_disabled()
             assert not page.locator("#height-legend").is_visible()
             page.locator("#building-toggle").check(force=True)

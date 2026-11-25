@@ -55,7 +55,10 @@ assert.equal(h.data().features[0].properties.statusText,'Позиция от 16:
 assert.equal(h.layers.get('module-spb-live:bus-label').layout['text-field'][1][1],'label');
 assert.equal(h.layers.get('module-spb-live:bus-point').minzoom,12);
 assert.equal(h.layers.get('module-spb-live:bus-label').minzoom,13);
-assert.deepEqual(plain(h.layers.get('module-spb-live:bus-point').paint['circle-opacity']),['*',1,['min',1,['max',0,['to-number',['get','opacity'],1]]]]);
+for (const type of ['bus','tram','trolley']) {
+  assert.equal(h.layers.get(`module-spb-live:${type}-point`).paint['circle-opacity'],1);
+  assert.equal(h.layers.get(`module-spb-live:${type}-label`).paint['text-opacity'],1);
+}
 await h.advance(15999);assert.equal(h.requests.length,1);
 await h.advance(1);assert.equal(h.requests.length,2,'Positions are re-fetched, not cached for five minutes');
 await h.host.configure('spb-live',{route:'4а',tram:false,trolley:false});
@@ -74,7 +77,10 @@ let parsed=h.api.normalizeVehicles([
 ],{bounds,types,receivedAt:AT,referenceTime:AT});
 assert.equal(parsed.bus.features.length,1);assert.equal(parsed.trolley.features.length,0,'25-minute-old trolley must not look current');
 assert.equal(parsed.bus.features[0].properties.timeConfirmed,false);assert.match(parsed.bus.features[0].properties.statusText,/не подтверждено/);
-assert.equal(parsed.tram.features[0].properties.opacity,.4);
+assert.match(parsed.tram.features[0].properties.statusText,/Позиция могла устареть/);
+const oldPosition=h.api.normalizeVehicles([vehicle(6,'bus','49','2026-11-17T13:21:36Z')],{bounds,types,receivedAt:AT}).bus.features[0];
+assert.equal(oldPosition.properties.timeConfirmed,true);
+assert.equal(oldPosition.properties.statusText,'Позиция от 16:21:36 · Получено 16:22:37 · Позиция могла устареть · Курс 341°');
 parsed=h.api.normalizeVehicles([vehicle(1,'bus','4А'),vehicle(2,'bus','49')],{bounds,types,route:'4а',receivedAt:AT});
 assert.equal(parsed.bus.features.length,1);assert.equal(parsed.bus.features[0].properties.route,'4А');
 parsed=h.api.normalizeVehicles([vehicle(1,'bus','49',''),vehicle(2,'bus','49','2026-11-17T18:22:29Z'),vehicle(3,'bus','49','2026-11-17T12:00:00Z')],{bounds,types,receivedAt:AT});

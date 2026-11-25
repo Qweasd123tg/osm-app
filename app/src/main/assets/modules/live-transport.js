@@ -136,8 +136,7 @@
     const maxTime = parsedTimes.length ? Math.max(...parsedTimes) : NaN;
     // In the verified municipal response Moscow wall time is labelled "Z".
     // Detect that response-level anomaly only to reject clearly old positions.
-    // It is NOT a documented timezone contract: adjusted points remain visibly
-    // unconfirmed, rather than being presented as guaranteed fresh GPS fixes.
+    // The feature details show when the source timestamp is unconfirmed.
     const difference = maxTime - referenceTime;
     const inferredOffset = difference > 2.8 * 3600000 && difference < 3.2 * 3600000 ? 3 * 3600000 : 0;
     const result = Object.fromEntries(Object.keys(TYPES).map(type => [type, EMPTY()]));
@@ -161,12 +160,12 @@
       const direction = number(item.Direction);
       const heading = direction !== null && direction >= 0 && direction < 360 ? direction : null;
       receivedTime ??= clock(receivedAt);
-      const statusText = `${timeStatus} · Получено ${receivedTime}${heading === null ? "" : ` · Курс ${Math.round(heading)}°`}`;
-      const opacity = validTime && age > 60000 ? .4 : confirmed ? .95 : .65;
+      const ageStatus = validTime && age > 60000 ? " · Позиция могла устареть" : "";
+      const statusText = `${timeStatus} · Получено ${receivedTime}${ageStatus}${heading === null ? "" : ` · Курс ${Math.round(heading)}°`}`;
       result[type].features.push({ type: "Feature", id: `${type}:${id}`, properties: {
         kind: "vehicle", name: `${routeName} · ${TYPES[type].name}`, label: routeName, statusText,
         color: chosen?.color || TYPES[type].color, labelColor: chosen?.color || TYPES[type].labelColor, vehicleType: type,
-        opacity, heading, rawTimestamp, observationTime: validTime ? new Date(adjusted).toISOString() : "", receivedAt, timeConfirmed: confirmed, route: routeName, vehicleId: id,
+        heading, rawTimestamp, observationTime: validTime ? new Date(adjusted).toISOString() : "", receivedAt, timeConfirmed: confirmed, route: routeName, vehicleId: id,
       }, geometry: { type: "Point", coordinates: point } });
       seen.add(`${type}:${id}`);
     }
@@ -180,7 +179,11 @@
     if (routes === null && (typeof ctx.settings.route !== "string" || ctx.settings.route.trim().length > 12)) throw new Error("Номер маршрута не должен быть длиннее 12 символов");
     let generation = 0, request = null, timer = null, disposed = false;
     const render = data => {
-      for (const type of Object.keys(TYPES)) ctx.setGeoJson(type, data[type], { color: TYPES[type].color, colorProperty: "color", opacity: 1, pointMinZoom: MIN_ZOOM, pointLabelMinZoom: MIN_ZOOM + 1, pointRadius: 7, pointMarker: "vehicle", pointTransitionMs: POLL_MS, pointHeading: "heading", pointType: "vehicleType", pointLabel: "label", pointLabelStyle: "vehicle", pointLabelColorProperty: "labelColor", pointOpacity: "opacity" });
+      for (const type of Object.keys(TYPES)) ctx.setGeoJson(type, data[type], {
+        color: TYPES[type].color, colorProperty: "color", opacity: 1, pointMinZoom: MIN_ZOOM, pointLabelMinZoom: MIN_ZOOM + 1,
+        pointRadius: 7, pointMarker: "vehicle", pointTransitionMs: POLL_MS, pointHeading: "heading", pointType: "vehicleType",
+        pointLabel: "label", pointLabelStyle: "vehicle", pointLabelColorProperty: "labelColor",
+      });
     };
     const clear = () => render(Object.fromEntries(Object.keys(TYPES).map(type => [type, EMPTY()])));
     const invalidate = () => { generation++; clearTimeout(timer); timer = null; request?.abort(); request = null; };
@@ -238,7 +241,7 @@
   }
 
   function register(host) {
-    host.register({ id: "spb-live", apiVersion: 1, version: "1.3.0", title: "Транспорт сейчас", description: "Позиции автобусов, трамваев и троллейбусов Петербурга. Обновление каждые 16 секунд в видимой области от масштаба 12.", capabilities: ["geojson"], defaults: { bus: true, tram: true, trolley: true, route: "", routes: "" } }, activateVehicles);
+    host.register({ id: "spb-live", apiVersion: 1, version: "1.3.1", title: "Транспорт сейчас", description: "Позиции автобусов, трамваев и троллейбусов Петербурга. Обновление каждые 16 секунд в видимой области от масштаба 12.", capabilities: ["geojson"], defaults: { bus: true, tram: true, trolley: true, route: "", routes: "" } }, activateVehicles);
   }
   const controls = Object.freeze({
     "spb-live": Object.freeze([

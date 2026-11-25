@@ -5,7 +5,7 @@ const asset=name=>fs.readFileSync(new URL(`../app/src/main/assets/${name}`,impor
 const plain=value=>JSON.parse(JSON.stringify(value));
 const document={createElement(tag){
   assert.equal(tag,'canvas');const calls=[];
-  const context=new Proxy({getImageData:()=>({width:80,height:80,data:new Uint8Array(4),calls:[...calls]}),measureText:text=>({width:text.length*7})},
+  const context=new Proxy({getImageData:(_x,_y,width,height)=>({width,height,data:new Uint8Array(4),calls:[...calls]}),measureText:text=>({width:text.length*7})},
     {get(target,key){if(key in target)return target[key];return (...args)=>calls.push([key,...args]);},set(target,key,value){target[key]=value;calls.push([key,value]);return true;}});
   return {getContext:kind=>{assert.equal(kind,'2d');return context;}};
 }};
@@ -16,6 +16,16 @@ const sandbox={window:{document,Path2D},AbortController,TextEncoder,setTimeout,c
 for(const file of ['layer-runtime.js','transport-symbols.js','vehicle-markers.js','module-host.js'])vm.runInContext(asset(file),sandbox);
 const {Host,limits}=sandbox.window.SloiModules,renderer=sandbox.window.SloiVehicleMarkers;
 const symbols = sandbox.window.SloiTransportSymbols;
+for (const [devicePixelRatio, ratio] of [[1, 2], [2.4, 3], [3, 3], [4, 3], [NaN, 2], [Infinity, 2]]) {
+  const window = { document, Path2D, devicePixelRatio, SloiTransportSymbols: symbols };
+  vm.runInNewContext(asset('vehicle-markers.js'), { window });
+  const dense = window.SloiVehicleMarkers;
+  for (const sprite of [dense.body('#123456', true), dense.icon('bus')]) {
+    assert.equal(sprite.width, 40 * ratio, 'Textures use a bounded 2× or 3× resolution');
+    assert.equal(sprite.width / dense.pixelRatio, renderer.size, 'Sprite width in CSS pixels stays the same');
+    assert.equal(sprite.height / dense.pixelRatio, renderer.size, 'Sprite height in CSS pixels stays the same');
+  }
+}
 const references = {
   bus:'bus.svg', tram:'tram.svg', trolley:'trolley.svg',
   metro:'metro-spb.svg', 'metro-plain':'metro-spb-plain.svg',

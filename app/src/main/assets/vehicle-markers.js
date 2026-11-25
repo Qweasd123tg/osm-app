@@ -3,7 +3,9 @@
 
   // Local sprites keep all vehicles in two GPU symbol layers. Their heading is
   // a layout property, never a new texture or DOM element for every position.
-  const SIZE = 40, PIXEL_RATIO = 2;
+  const SIZE = 40;
+  const devicePixelRatio = Number.isFinite(root.devicePixelRatio) ? root.devicePixelRatio : 1;
+  const PIXEL_RATIO = Math.max(2, Math.min(3, Math.ceil(devicePixelRatio)));
   const BODY_SIZE = 44, BODY_SCALE = .8;
   const types = Object.freeze(["bus", "tram", "trolley"]);
   const whiteGlyphColors = new Set(["#1a73f0", "#eb5a2b", "#e9a300", "#c48900"]);
@@ -48,6 +50,9 @@
     context.lineWidth = 2;
     context.beginPath();
     context.arc(22, 22, 16, 0, Math.PI * 2);
+    // Back the colored circle with white so independently anti-aliased
+    // edges of the fill and outline cannot expose a ring of the basemap.
+    context.fill();
     context.stroke();
 
     context.fillStyle = color;

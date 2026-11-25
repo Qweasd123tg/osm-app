@@ -428,6 +428,7 @@ function initializeModules() {
   try { fallbackStorage = localStorage; } catch (_) {}
   const storage = window.SloiExtensionStorage.create({ native: window.AndroidHost, fallback: fallbackStorage });
   moduleHost = new window.SloiModules.Host({ map, storage, onChange: renderModules,
+    anchor: "route-lines-anchor", vehicleAnchor: "route-points-anchor",
     services: { shadows: activateShadowExtension } });
   window.SloiBundledModules.register(moduleHost);
   window.SloiLiveTransport?.register(moduleHost);
@@ -632,7 +633,11 @@ function saveState() {
 }
 
 function renderPixelRatio() {
-  return Math.min(window.devicePixelRatio || 1, economyMode ? 1 : 2);
+  if (economyMode) return 1;
+  // Preserve native sharpness on phone screens without allowing high-density
+  // tablets/desktops to allocate an unbounded WebGL drawing buffer.
+  const area = Math.max(1, window.innerWidth * window.innerHeight);
+  return Math.min(window.devicePixelRatio || 1, 3, Math.sqrt(3_000_000 / area));
 }
 
 function viewportBudget() {
@@ -3055,6 +3060,12 @@ try {
       return style;
     })(),
   });
+  const resizeMapResolution = () => {
+    const pixelRatio = renderPixelRatio();
+    if (map.getPixelRatio() !== pixelRatio) map.setPixelRatio(pixelRatio);
+  };
+  window.addEventListener("resize", resizeMapResolution);
+  map.on("remove", () => window.removeEventListener("resize", resizeMapResolution));
   window.SloiBasemapRecovery.install({ map, document });
   window.SloiMapGestures.install(map, { onActiveChange(active) {
     mapTouchActive = active;
@@ -3175,7 +3186,11 @@ try {
       },
     });
 
-    map.addLayer({ id: "module-anchor", type: "background", paint: { "background-opacity": 0 } }, "selected-location");
+    // Stable ceilings for base overlays, modules, route lines and vehicles.
+    // Route points and the selected location stay above them.
+    for (const id of ["module-anchor", "route-lines-anchor", "live-vehicles-anchor", "route-points-anchor"]) {
+      map.addLayer({ id, type: "background", paint: { "background-opacity": 0 } }, "selected-location");
+    }
     mapReady = true;
     offlineBasemap.refresh();
     initializeLayerRuntime();
@@ -3184,7 +3199,7 @@ try {
     scheduleViewportTiles();
     restoreCustomLayers();
     initializeModules();
-    routingUI = window.SloiRoutingUI.install({ map,
+    routingUI = window.SloiRoutingUI.install({ map, lineAnchor: "live-vehicles-anchor",
       getDestination: () => selectedPlace,
       getCurrentPosition,
       searchPlaces: queryPlaceSuggestions,

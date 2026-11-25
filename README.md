@@ -9,7 +9,7 @@ Android-клиент OpenStreetMap на MapLibre с подключаемыми �
 Тестовый район при старте не загружается. Поиск и геолокация перемещают карту
 без обязательного расчёта теней.
 
-## Текущее поведение 0.6.12
+## Текущее поведение 0.6.13
 
 Маркеры сохраняют круглую форму при наклоне карты. Пиктограммы всегда
 смотрят на экран, указатель показывает курс с учётом поворота карты.
@@ -18,6 +18,11 @@ Android-клиент OpenStreetMap на MapLibre с подключаемыми �
 и остановки используют отдельные исходники того же атласа: белый символ вида
 транспорта, корпус с белой обводкой и указателем, компактный номер слева сверху.
 Ресурсы интерфейса и карты различаются. [Происхождение SVG](app/src/main/assets/vendor/twogis-transport/NOTICE.md)
+
+Машины и номера полностью непрозрачны. Спрайты из SVG-контуров учитывают
+плотность экрана до 3×; карта использует родное разрешение в пределах
+примерно 3 млн пикселей, экономичный режим сохраняет 1×. Линии маршрутов
+всегда находятся под живым транспортом, включая повторное включение слоя.
 
 Между полученными GPS-позициями машины плавно перемещаются и поворачивают
 кратчайшим путём. Опрос остаётся раз в 16 секунд; прогноз после последней
@@ -332,6 +337,7 @@ python3 tools/test_camera_ownership_browser.py --chromium /usr/bin/google-chrome
 python3 tools/test_module_settings_browser.py --chromium /usr/bin/google-chrome
 python3 tools/test_settings_page_browser.py --chromium /usr/bin/google-chrome
 python3 tools/test_routing_browser.py --chromium /usr/bin/google-chrome
+python3 tools/test_transport_quality_browser.py --chromium /usr/bin/google-chrome
 python3 tools/test_map_picker_browser.py --chromium /usr/bin/google-chrome
 python3 tools/test_disclosure_motion_browser.py --chromium /usr/bin/google-chrome
 python3 tools/test_offline_basemap_browser.py --chromium /usr/bin/google-chrome
@@ -343,6 +349,13 @@ python3 tools/test_offline_places_browser.py --chromium /usr/bin/google-chrome
 CDP посылает настоящие touch-события Chromium, но это не проверка физического
 телефона. JVM-регрессии проверяют границы, сериализацию, индексы, кэши,
 загрузчик и разрешения.
+
+В 0.6.13 прошли 111 JVM-тестов и проверки SVG-спрайтов, GPS-времени,
+плавного движения и порядка слоёв. Chromium с профилем 450×975 / DPR 2.4
+подтвердил WebGL-буфер 1080×2340, текстуры 3× и непрозрачные пиксели машины
+поверх линии маршрута. Проверены ограничение разрешения после resize и
+экономичный режим. Это синтетическая браузерная проверка; установка этой
+версии на физический телефон пока не проверена.
 
 В 0.6.12 прошли 20 проверок JavaScript и 111 JVM-тестов. Все 60 файлов
 ассетов APK совпали с исходниками. Отдельные сценарии настоящего MapLibre

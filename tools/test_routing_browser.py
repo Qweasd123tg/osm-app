@@ -1,6 +1,7 @@
 """Route planning UI with real app/MapLibre and synthetic provider responses; no live network."""
 import argparse
 from copy import deepcopy
+from datetime import datetime, timezone
 from functools import partial
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -49,6 +50,18 @@ def assert_route_in_view(page):
     assert not view["outside"], view
 
 
+def assert_vehicle_layer_order(page):
+    order = page.evaluate("map.getStyle().layers.map(layer=>layer.id)")
+    route_lines = [order.index(f"route-plan-{layer}") for layer in ["casing", "line", "walk"]]
+    vehicles = [
+        order.index(f"module-spb-live:{kind}-{layer}")
+        for kind in ["bus", "tram", "trolley"]
+        for layer in ["point", "vehicle-icon", "label"]
+    ]
+    assert max(route_lines) < min(vehicles), "Every route line must be under the vehicles and their numbers"
+    assert max(vehicles) < order.index("route-plan-stops") < order.index("route-plan-endpoints") < order.index("selected-location")
+
+
 def assert_cards_visible(page):
     visible = page.locator(".routing-options").evaluate("""rail => {
       const clip=rail.getBoundingClientRect(), form=rail.closest('form').getBoundingClientRect();
@@ -95,6 +108,12 @@ def main():
                     from urllib.parse import urlparse, parse_qs
                     query = parse_qs(urlparse(url).query)["q"][0]
                     route.fulfill(json={"features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[30.34,59.87]},"properties":{"name":query+" выбран","city":"Петербург"}}]})
+                elif "/api/visary/geometry/vehicle?" in url:
+                    route.fulfill(json=[{
+                        "VehicleId": 26, "RouteId": 1, "RouteShortName": "26", "TransportType": "bus", "Direction": 90,
+                        "Location": {"Longitude": 30.3275, "Latitude": 59.8525},
+                        "DateTime": datetime.now(timezone.utc).isoformat(),
+                    }])
                 else: route.abort()
             context.route("**/*", handle)
             page = context.new_page(); page.on("pageerror", lambda error: errors.append(str(error)))
@@ -104,6 +123,9 @@ def main():
               window.routingTestUI=routingUI;
               map.jumpTo({center:[30.325,59.855],zoom:15,pitch:37,bearing:20,padding:{top:12,right:8,bottom:40,left:4}});
             }""")
+            # The route's first render must stack below vehicles already on the map.
+            page.evaluate("moduleHost.enable('spb-live')")
+            page.wait_for_function("map.getSource('module-spb-live:bus-source')._data.features.length > 0")
             pin = page.evaluate("selectedPlace")
             original_padding = page.evaluate("map.getPadding()")
             page.locator("#route-open").click()
@@ -128,6 +150,14 @@ def main():
             assert page.evaluate("selectedPlace") == pin
             assert page.locator("#routing-panel").bounding_box() == rect, "Results must not move or resize the panel"
             page.wait_for_function("map.queryRenderedFeatures({layers:['route-plan-line']}).some(f=>f.properties.kind==='walk'&&f.properties.routeColor==='#23b34b')")
+            assert_vehicle_layer_order(page)
+            # Recreating vehicle layers while the route is active must preserve the order.
+            page.evaluate("moduleHost.disable('spb-live')")
+            assert not page.evaluate("map.getLayer('module-spb-live:bus-point') !== undefined")
+            page.evaluate("moduleHost.enable('spb-live')")
+            page.wait_for_function("map.getSource('module-spb-live:bus-source')._data.features.length > 0")
+            assert_vehicle_layer_order(page)
+            page.evaluate("moduleHost.disable('spb-live')")
             assert page.evaluate("map.queryRenderedFeatures({layers:['route-plan-walk']}).length") == 0
             assert page.evaluate("map.getPaintProperty('route-plan-line','line-dasharray')") is None
             rail = page.locator(".routing-options")

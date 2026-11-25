@@ -348,7 +348,8 @@
       if (source && map.getSource(SOURCE) === source) return;
       if (map.getSource(SOURCE) || LAYERS.some(id => map.getLayer(id))) throw new Error("Слой маршрута уже занят");
       map.addSource(SOURCE, { type: "geojson", data: empty() }); source = map.getSource(SOURCE);
-      const before = map.getLayer("selected-location") ? "selected-location" : undefined;
+      const beforePoints = map.getLayer("selected-location") ? "selected-location" : undefined;
+      const beforeLines = options.lineAnchor && map.getLayer(options.lineAnchor) ? options.lineAnchor : beforePoints;
       const isLine = ["==", ["geometry-type"], "LineString"];
       const walkConnector = ["==", ["get", "walkConnector"], true];
       const solidRoute = ["all", isLine, ["!", walkConnector]];
@@ -357,17 +358,17 @@
       map.addLayer({
         id: LAYERS[0], type: "line", source: SOURCE, filter: solidRoute, layout: roundedLine,
         paint: { "line-color": "#10191f", "line-width": 6.5, "line-opacity": .75 },
-      }, before);
+      }, beforeLines);
       map.addLayer({
         id: LAYERS[1], type: "line", source: SOURCE, filter: solidRoute, layout: roundedLine,
         paint: { "line-color": lineColor, "line-width": 5 },
-      }, before);
+      }, beforeLines);
       map.addLayer({
         id: LAYERS[2], type: "line", source: SOURCE, filter: ["all", isLine, walkConnector], layout: roundedLine,
         paint: { "line-color": lineColor, "line-width": 4, "line-dasharray": [1, 1.4] },
-      }, before);
-      map.addLayer({ id: LAYERS[3], type: "circle", source: SOURCE, minzoom: 15, filter: ["==", ["get", "kind"], "stop"], paint: { "circle-color": "#ffffff", "circle-radius": 4, "circle-stroke-color": ["get", "routeColor"], "circle-stroke-width": 2 } }, before);
-      map.addLayer({ id: LAYERS[4], type: "circle", source: SOURCE, filter: ["==", ["get", "kind"], "endpoint"], paint: { "circle-color": "#3974d5", "circle-radius": 6, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 } }, before);
+      }, beforeLines);
+      map.addLayer({ id: LAYERS[3], type: "circle", source: SOURCE, minzoom: 15, filter: ["==", ["get", "kind"], "stop"], paint: { "circle-color": "#ffffff", "circle-radius": 4, "circle-stroke-color": ["get", "routeColor"], "circle-stroke-width": 2 } }, beforePoints);
+      map.addLayer({ id: LAYERS[4], type: "circle", source: SOURCE, filter: ["==", ["get", "kind"], "endpoint"], paint: { "circle-color": "#3974d5", "circle-radius": 6, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 } }, beforePoints);
     }
 
     function showRoute(route, from, to, fit) {
